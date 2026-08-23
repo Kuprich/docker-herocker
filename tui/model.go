@@ -148,7 +148,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedIdx >= len(m.containers) {
 			m.selectedIdx = 0
 		}
-		m.mainViewport.GotoTop()
+		m.scrollToSelected()
 		return m, m.refreshDelayed()
 
 	case imageMsg:
@@ -157,7 +157,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedIdx >= len(m.images) {
 			m.selectedIdx = 0
 		}
-		m.mainViewport.GotoTop()
+		m.scrollToSelected()
 		return m, m.refreshDelayed()
 
 	case volumeMsg:
@@ -166,7 +166,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedIdx >= len(m.volumes) {
 			m.selectedIdx = 0
 		}
-		m.mainViewport.GotoTop()
+		m.scrollToSelected()
 		return m, m.refreshDelayed()
 
 	case networkMsg:
@@ -175,7 +175,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedIdx >= len(m.networks) {
 			m.selectedIdx = 0
 		}
-		m.mainViewport.GotoTop()
+		m.scrollToSelected()
 		return m, m.refreshDelayed()
 
 	case logMsg:
@@ -567,6 +567,7 @@ func (m *Model) moveUp() {
 	if m.selectedIdx > 0 {
 		m.selectedIdx--
 	}
+	m.scrollToSelected()
 }
 
 func (m *Model) moveDown() {
@@ -581,6 +582,23 @@ func (m *Model) moveDown() {
 	}
 	if m.selectedIdx < maxIdx {
 		m.selectedIdx++
+	}
+	m.scrollToSelected()
+}
+
+func (m *Model) scrollToSelected() {
+	vh := m.mainViewport.Height
+	if vh <= 0 {
+		return
+	}
+	rowY := 2 + m.selectedIdx
+	yOff := m.mainViewport.YOffset
+	if rowY <= 2 {
+		m.mainViewport.SetYOffset(0)
+	} else if rowY < yOff {
+		m.mainViewport.SetYOffset(rowY - 1)
+	} else if rowY >= yOff+vh-1 {
+		m.mainViewport.SetYOffset(rowY - vh + 2)
 	}
 }
 
