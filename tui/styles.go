@@ -12,10 +12,6 @@ var (
 		Background(t.Background).
 		Foreground(t.Foreground)
 
-	SidebarStyle = lipgloss.NewStyle().
-		Background(t.Surface).
-		Width(20)
-
 	MainPanelStyle = lipgloss.NewStyle().
 		Background(t.Background).
 		Padding(0, 0)
@@ -26,14 +22,16 @@ var (
 		Padding(0, 1).
 		Height(1)
 
-	SidebarItem = lipgloss.NewStyle().
+	TabActiveStyle = lipgloss.NewStyle().
 		Background(t.Surface).
-		Padding(0, 0)
-
-	SidebarItemActive = SidebarItem.Copy().
-		Background(lipgloss.Color("#1c2d1f")).
 		Foreground(t.Accent).
-		Bold(true)
+		Bold(true).
+		Padding(0, 1)
+
+	TabInactiveStyle = lipgloss.NewStyle().
+		Background(t.Background).
+		Foreground(t.Muted).
+		Padding(0, 1)
 )
 
 func Truncate(s string, max int) string {

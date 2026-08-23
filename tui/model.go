@@ -18,8 +18,7 @@ import (
 type panel int
 
 const (
-	panelSidebar panel = iota
-	panelMain
+	panelMain panel = iota
 	panelLogs
 )
 
@@ -86,8 +85,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.logViewport = viewport.New(
-			msg.Width-sidebarWidth-5,
-			msg.Height-helpBarHeight-4,
+			msg.Width-5,
+			msg.Height-tabBarHeight-helpBarHeight-4,
 		)
 		m.logViewport.Style = BaseStyle
 		m.ready = true
@@ -170,7 +169,8 @@ func (m Model) View() string {
 		return "\n  Initializing…"
 	}
 	content := lipgloss.JoinVertical(lipgloss.Top,
-		lipgloss.JoinHorizontal(lipgloss.Top, m.renderSidebar(), m.renderMain()),
+		m.renderTabBar(),
+		m.renderMain(),
 		m.renderHelpBar(),
 	)
 	return lipgloss.Place(m.width, m.height,
@@ -186,35 +186,34 @@ func (m Model) renderHelpBar() string {
 	if m.helpOn {
 		return HelpBarStyle.Width(m.width).Render(m.help.View(keys))
 	}
-	h := " 1-4  tabs  •  ↑/↓  navigate  •  Tab  panel  •  Enter  logs  •  Space  start/stop  •  r  restart  •  a  all  •  ?  help"
+	h := " 1-4  tabs  •  ↑/↓  navigate  •  Enter  logs  •  Space  start/stop  •  r  restart  •  a  all  •  ?  help"
 	return HelpBarStyle.Width(m.width).Render(h)
 }
 
-func (m Model) renderSidebar() string {
+func (m Model) renderTabBar() string {
 	items := []string{"[1] Containers", "[2] Images", "[3] Volumes", "[4] Compose"}
-	var lines []string
-	lines = append(lines, "")
+	var tabs []string
 	for i, item := range items {
-		s := SidebarItem.Copy()
-		if i == int(m.activeTab) && m.activePanel == panelSidebar {
-			s = SidebarItemActive.Copy()
-		} else if i == int(m.activeTab) {
-			s = s.Foreground(t.Accent)
+		if i == int(m.activeTab) {
+			tabs = append(tabs, TabActiveStyle.Render(" "+item+" "))
+		} else {
+			tabs = append(tabs, TabInactiveStyle.Render(" "+item+" "))
 		}
-		lines = append(lines, s.Width(sidebarWidth).Render(" "+item))
 	}
-	return SidebarStyle.
-		Width(sidebarWidth).
-		Height(m.height - helpBarHeight).
-		Render(lipgloss.JoinVertical(lipgloss.Top, lines...))
+	tabsContent := lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
+	tabsContent = lipgloss.Place(m.width, 1, lipgloss.Left, lipgloss.Top, tabsContent,
+		lipgloss.WithWhitespaceBackground(t.Background),
+	)
+	line := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", m.width))
+	return lipgloss.JoinVertical(lipgloss.Top, line, tabsContent, line)
 }
 
 func (m Model) renderMain() string {
 	if m.activePanel == panelLogs {
 		return m.renderLogView()
 	}
-	w := m.width - sidebarWidth
-	h := m.height - helpBarHeight
+	w := m.width
+	h := m.height - tabBarHeight - helpBarHeight
 
 	if m.err != nil {
 		return MainPanelStyle.Width(w).Height(h).Render(errorStyle.Render(m.err.Error()))
@@ -371,8 +370,8 @@ func formatCreated(created int64) string {
 }
 
 func (m Model) renderLogView() string {
-	w := m.width - sidebarWidth
-	h := m.height - helpBarHeight
+	w := m.width
+	h := m.height - tabBarHeight - helpBarHeight
 
 	if len(m.containers) == 0 || m.selectedIdx >= len(m.containers) {
 		return MainPanelStyle.Width(w).Height(h).Render("")
@@ -409,41 +408,26 @@ func formatPorts(ports []docker.Port) string {
 // ---- navigation ----
 
 func (m *Model) cyclePanel() {
-	switch m.activePanel {
-	case panelSidebar:
+	if m.activePanel == panelMain {
+		m.activePanel = panelLogs
+	} else {
 		m.activePanel = panelMain
-	case panelMain, panelLogs:
-		m.activePanel = panelSidebar
 	}
 }
 
 func (m *Model) moveUp() {
-	switch m.activePanel {
-	case panelSidebar:
-		if m.activeTab > 0 {
-			m.activeTab--
-		}
-	case panelMain:
-		if m.selectedIdx > 0 {
-			m.selectedIdx--
-		}
+	if m.selectedIdx > 0 {
+		m.selectedIdx--
 	}
 }
 
 func (m *Model) moveDown() {
-	switch m.activePanel {
-	case panelSidebar:
-		if int(m.activeTab) < 3 {
-			m.activeTab++
-		}
-	case panelMain:
-		maxIdx := len(m.containers) - 1
-		if m.activeTab == tabImages {
-			maxIdx = len(m.images) - 1
-		}
-		if m.selectedIdx < maxIdx {
-			m.selectedIdx++
-		}
+	maxIdx := len(m.containers) - 1
+	if m.activeTab == tabImages {
+		maxIdx = len(m.images) - 1
+	}
+	if m.selectedIdx < maxIdx {
+		m.selectedIdx++
 	}
 }
 

@@ -3,9 +3,9 @@ package tui
 import "github.com/charmbracelet/lipgloss"
 
 const (
-	sidebarWidth     = 22
-	helpBarHeight    = 1
-	logRefreshRate   = 200
+	tabBarHeight   = 3
+	helpBarHeight  = 1
+	logRefreshRate = 200
 )
 
 var errorStyle = lipgloss.NewStyle().
