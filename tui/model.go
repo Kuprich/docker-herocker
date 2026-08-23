@@ -205,7 +205,7 @@ func (m Model) renderMain() string {
 	}
 
 	colW := w
-	hdr := "    NAME                          STATUS                IMAGE"
+	hdr := fmt.Sprintf("     %-30s %-32s  %-30s", "NAME", "STATUS", "IMAGE")
 	hdr = hdr + strings.Repeat(" ", colW-len([]rune(hdr)))
 	header := lipgloss.NewStyle().Background(t.Background).Foreground(t.Accent).Bold(true).Render(hdr)
 	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Muted).Render(strings.Repeat("─", colW))
@@ -213,23 +213,42 @@ func (m Model) renderMain() string {
 	var rows []string
 	for i, c := range m.containers {
 		name := Truncate(strings.TrimPrefix(c.Names[0], "/"), 30)
-		status := Truncate(c.Status, 22)
+		status := Truncate(c.Status, 32)
 		img := Truncate(c.Image, 30)
 
-		dot := "•"
+		dot := "●"
+		dotColor := t.Muted
 		switch c.State {
+		case "running":
+			dotColor = t.Success
+		case "paused":
+			dotColor = t.Warning
 		case "exited":
-			dot = "∘"
+			dotColor = t.Muted
+			dot = "○"
+		default:
+			dotColor = t.Error
 		}
 
-		line := fmt.Sprintf(" %s  %-30s %-22s  %-30s", dot, name, status, img)
-		line = line + strings.Repeat(" ", colW-len([]rune(line)))
+		line := fmt.Sprintf(" %s  %-30s %-32s  %-30s", dot, name, status, img)
+		runes := []rune(line)
+		padding := colW - len(runes)
+		if padding > 0 {
+			line = line + strings.Repeat(" ", padding)
+		}
+		runes = []rune(line)
+		dotRune := string(runes[1:2])
+		rest := string(runes[2:])
 
 		bg := t.Background
 		if i == m.selectedIdx {
 			bg = lipgloss.Color("#1c2d1f")
 		}
-		rows = append(rows, lipgloss.NewStyle().Background(bg).Foreground(t.Foreground).Render(line))
+		bgStyle := lipgloss.NewStyle().Background(bg)
+		row := bgStyle.Render(" ") +
+			bgStyle.Copy().Foreground(dotColor).Render(dotRune) +
+			bgStyle.Foreground(t.Foreground).Render(rest)
+		rows = append(rows, row)
 	}
 	return MainPanelStyle.Width(w).Height(h).Render(
 		lipgloss.JoinVertical(lipgloss.Top, header, sep, lipgloss.JoinVertical(lipgloss.Top, rows...)),
