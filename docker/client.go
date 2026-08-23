@@ -28,6 +28,13 @@ type Port struct {
 	Type        string `json:"Type"`
 }
 
+type Image struct {
+	ID        string   `json:"Id"`
+	RepoTags  []string `json:"RepoTags"`
+	Created   int64    `json:"Created"`
+	Size      int64    `json:"Size"`
+}
+
 type versionInfo struct {
 	APIVersion string `json:"ApiVersion"`
 }
@@ -128,6 +135,24 @@ func (c *Client) ListContainers(all bool) ([]Container, error) {
 		return nil, fmt.Errorf("decoding containers: %w", err)
 	}
 	return containers, nil
+}
+
+func (c *Client) ListImages(all bool) ([]Image, error) {
+	allFlag := "0"
+	if all {
+		allFlag = "1"
+	}
+	resp, err := c.do("GET", fmt.Sprintf("/images/json?all=%s", allFlag), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var images []Image
+	if err := json.NewDecoder(resp.Body).Decode(&images); err != nil {
+		return nil, fmt.Errorf("decoding images: %w", err)
+	}
+	return images, nil
 }
 
 func (c *Client) StartContainer(id string) error {

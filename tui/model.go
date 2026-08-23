@@ -32,6 +32,7 @@ const (
 )
 
 type containerMsg []docker.Container
+type imageMsg []docker.Image
 type errMsg struct{ err error }
 type logMsg string
 
@@ -39,6 +40,7 @@ type Model struct {
 	docker   *docker.Client
 
 	containers  []docker.Container
+	images      []docker.Image
 	selectedIdx int
 	activePanel panel
 	activeTab   tab
@@ -115,12 +117,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.activePanel == panelLogs {
 				m.activePanel = panelMain
 			}
+		case key.Matches(msg, keys.One):
+			m.activeTab = tabContainers
+			return m, m.refreshNow()
+		case key.Matches(msg, keys.Two):
+			m.activeTab = tabImages
+			return m, m.refreshNow()
+		case key.Matches(msg, keys.Three):
+			m.activeTab = tabVolumes
+			return m, m.refreshNow()
+		case key.Matches(msg, keys.Four):
+			m.activeTab = 3
+			return m, m.refreshNow()
 		}
 
 	case containerMsg:
 		m.containers = msg
 		m.loading = false
 		if m.selectedIdx >= len(m.containers) {
+			m.selectedIdx = 0
+		}
+		return m, m.refreshDelayed()
+
+	case imageMsg:
+		m.images = msg
+		m.loading = false
+		if m.selectedIdx >= len(m.images) {
 			m.selectedIdx = 0
 		}
 		return m, m.refreshDelayed()
@@ -164,12 +186,12 @@ func (m Model) renderHelpBar() string {
 	if m.helpOn {
 		return HelpBarStyle.Width(m.width).Render(m.help.View(keys))
 	}
-	h := " ↑/↓  navigate  •  Tab  panel  •  Enter  logs  •  Space  start/stop  •  r  restart  •  a  all  •  ?  help"
+	h := " 1-4  tabs  •  ↑/↓  navigate  •  Tab  panel  •  Enter  logs  •  Space  start/stop  •  r  restart  •  a  all  •  ?  help"
 	return HelpBarStyle.Width(m.width).Render(h)
 }
 
 func (m Model) renderSidebar() string {
-	items := []string{"Containers", "Images", "Volumes", "Compose"}
+	items := []string{"[1] Containers", "[2] Images", "[3] Volumes", "[4] Compose"}
 	var lines []string
 	lines = append(lines, "")
 	for i, item := range items {
@@ -197,14 +219,23 @@ func (m Model) renderMain() string {
 	if m.err != nil {
 		return MainPanelStyle.Width(w).Height(h).Render(errorStyle.Render(m.err.Error()))
 	}
+
+	switch m.activeTab {
+	case tabImages:
+		return m.renderImageList(w, h)
+	default:
+		return m.renderContainerList(w, h)
+	}
+}
+
+func (m Model) renderContainerList(w, h int) string {
+	colW := w
 	if m.loading && len(m.containers) == 0 {
 		return MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" Waiting for Docker…"))
 	}
 	if len(m.containers) == 0 {
 		return MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No containers found"))
 	}
-
-	colW := w
 	hdr := fmt.Sprintf("     %-29s %-29s  %-27s  %-30s", "NAME", "STATUS", "IMAGE", "PORTS")
 	hdr = hdr + strings.Repeat(" ", colW-len([]rune(hdr)))
 	header := lipgloss.NewStyle().Background(t.Background).Foreground(t.Accent).Bold(true).Render(hdr)
@@ -257,6 +288,86 @@ func (m Model) renderMain() string {
 	return MainPanelStyle.Width(w).Height(h).Render(
 		lipgloss.JoinVertical(lipgloss.Top, header, sep, lipgloss.JoinVertical(lipgloss.Top, rows...)),
 	)
+}
+
+func (m Model) renderImageList(w, h int) string {
+	colW := w
+	if m.loading && len(m.images) == 0 {
+		return MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" Loading images…"))
+	}
+	if len(m.images) == 0 {
+		return MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No images found"))
+	}
+
+	hdr := fmt.Sprintf("     %-42s %-16s  %-20s  %-14s", "REPOSITORY:TAG", "IMAGE ID", "CREATED", "SIZE")
+	padding := colW - len([]rune(hdr))
+	if padding > 0 {
+		hdr += strings.Repeat(" ", padding)
+	}
+	header := lipgloss.NewStyle().Background(t.Background).Foreground(t.Accent).Bold(true).Render(hdr)
+	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Muted).Render(strings.Repeat("─", colW))
+
+	var rows []string
+	for i := range m.images {
+		img := &m.images[i]
+		repoTag := "<none>:<none>"
+		if len(img.RepoTags) > 0 && img.RepoTags[0] != "<none>:<none>" {
+			repoTag = img.RepoTags[0]
+		}
+		repoTag = Truncate(repoTag, 42)
+
+		shortID := Truncate(img.ID, 16)
+		if len(shortID) > 12 {
+			shortID = shortID[:12]
+		}
+
+		created := formatCreated(img.Created)
+		created = Truncate(created, 20)
+
+		size := formatImageSize(img.Size)
+		size = Truncate(size, 14)
+
+		line := fmt.Sprintf(" %s  %-42s %-16s  %-20s  %-14s", "◎", repoTag, shortID, created, size)
+		runes := []rune(line)
+		pad := colW - len(runes)
+		if pad > 0 {
+			line += strings.Repeat(" ", pad)
+			runes = []rune(line)
+		} else if pad < 0 {
+			runes = runes[:max(colW, 3)]
+			line = string(runes)
+		}
+
+		bg := t.Background
+		if i == m.selectedIdx {
+			bg = lipgloss.Color("#1c2d1f")
+		}
+		bgStyle := lipgloss.NewStyle().Background(bg)
+		row := bgStyle.Render(" ") +
+			bgStyle.Foreground(t.Foreground).Render(string(runes[1:]))
+		rows = append(rows, row)
+	}
+	return MainPanelStyle.Width(w).Height(h).Render(
+		lipgloss.JoinVertical(lipgloss.Top, header, sep, lipgloss.JoinVertical(lipgloss.Top, rows...)),
+	)
+}
+
+func formatImageSize(bytes int64) string {
+	switch {
+	case bytes >= 1<<30:
+		return fmt.Sprintf("%.1fGB", float64(bytes)/float64(1<<30))
+	case bytes >= 1<<20:
+		return fmt.Sprintf("%.1fMB", float64(bytes)/float64(1<<20))
+	case bytes >= 1<<10:
+		return fmt.Sprintf("%.1fKB", float64(bytes)/float64(1<<10))
+	default:
+		return fmt.Sprintf("%dB", bytes)
+	}
+}
+
+func formatCreated(created int64) string {
+	t := time.Unix(created, 0)
+	return t.Format("2006-01-02")
 }
 
 func (m Model) renderLogView() string {
@@ -326,7 +437,11 @@ func (m *Model) moveDown() {
 			m.activeTab++
 		}
 	case panelMain:
-		if m.selectedIdx < len(m.containers)-1 {
+		maxIdx := len(m.containers) - 1
+		if m.activeTab == tabImages {
+			maxIdx = len(m.images) - 1
+		}
+		if m.selectedIdx < maxIdx {
 			m.selectedIdx++
 		}
 	}
@@ -337,11 +452,20 @@ func (m *Model) moveDown() {
 func (m Model) refreshNow() tea.Cmd {
 	m.loading = true
 	return func() tea.Msg {
-		containers, err := m.docker.ListContainers(m.showAll)
-		if err != nil {
-			return errMsg{err}
+		switch m.activeTab {
+		case tabImages:
+			images, err := m.docker.ListImages(m.showAll)
+			if err != nil {
+				return errMsg{err}
+			}
+			return imageMsg(images)
+		default:
+			containers, err := m.docker.ListContainers(m.showAll)
+			if err != nil {
+				return errMsg{err}
+			}
+			return containerMsg(containers)
 		}
-		return containerMsg(containers)
 	}
 }
 
@@ -352,7 +476,7 @@ func (m Model) refreshDelayed() tea.Cmd {
 }
 
 func (m Model) toggleContainer() tea.Cmd {
-	if m.selectedIdx >= len(m.containers) {
+	if m.activeTab != tabContainers || m.selectedIdx >= len(m.containers) {
 		return nil
 	}
 	c := m.containers[m.selectedIdx]
@@ -372,7 +496,7 @@ func (m Model) toggleContainer() tea.Cmd {
 }
 
 func (m Model) restartContainer() tea.Cmd {
-	if m.selectedIdx >= len(m.containers) {
+	if m.activeTab != tabContainers || m.selectedIdx >= len(m.containers) {
 		return nil
 	}
 	c := m.containers[m.selectedIdx]
@@ -387,7 +511,7 @@ func (m Model) restartContainer() tea.Cmd {
 }
 
 func (m Model) handleViewLogs() tea.Cmd {
-	if m.selectedIdx >= len(m.containers) {
+	if m.activeTab != tabContainers || m.selectedIdx >= len(m.containers) {
 		return nil
 	}
 	c := m.containers[m.selectedIdx]

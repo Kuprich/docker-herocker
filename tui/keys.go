@@ -14,6 +14,10 @@ type keyMap struct {
 	StartStop key.Binding
 	Restart   key.Binding
 	ViewLogs  key.Binding
+	One       key.Binding
+	Two       key.Binding
+	Three     key.Binding
+	Four      key.Binding
 }
 
 var keys = keyMap{
@@ -60,6 +64,22 @@ var keys = keyMap{
 	ViewLogs: key.NewBinding(
 		key.WithKeys("enter"),
 		key.WithHelp("enter", "view logs"),
+	),
+	One: key.NewBinding(
+		key.WithKeys("1"),
+		key.WithHelp("1", "containers"),
+	),
+	Two: key.NewBinding(
+		key.WithKeys("2"),
+		key.WithHelp("2", "images"),
+	),
+	Three: key.NewBinding(
+		key.WithKeys("3"),
+		key.WithHelp("3", "volumes"),
+	),
+	Four: key.NewBinding(
+		key.WithKeys("4"),
+		key.WithHelp("4", "compose"),
 	),
 }
 
