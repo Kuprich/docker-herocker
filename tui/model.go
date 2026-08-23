@@ -258,36 +258,39 @@ func (m Model) renderMain() string {
 	w := m.width
 	h := m.height - tabBarHeight - helpBarHeight
 
-	var content string
+	var hdr, rows string
 	if m.err != nil {
-		content = MainPanelStyle.Width(w).Height(h).Render(errorStyle.Render(m.err.Error()))
+		rows = MainPanelStyle.Width(w).Height(h).Render(errorStyle.Render(m.err.Error()))
 	} else {
 		switch m.activeTab {
 		case tabImages:
-			content = m.renderImageList(w, h)
+			hdr, rows = m.renderImageList(w, h)
 		case tabVolumes:
-			content = m.renderVolumeList(w, h)
+			hdr, rows = m.renderVolumeList(w, h)
 		case tabNetworks:
-			content = m.renderNetworkList(w, h)
+			hdr, rows = m.renderNetworkList(w, h)
 		default:
-			content = m.renderContainerList(w, h)
+			hdr, rows = m.renderContainerList(w, h)
 		}
 	}
 	m.mainViewport.Width = w
-	m.mainViewport.Height = h
-	m.mainViewport.SetContent(content)
+	m.mainViewport.Height = h - 2
+	m.mainViewport.SetContent(rows)
 	m.mainViewport.SetYOffset(m.mainYOff)
 	m.mainViewport.Style = BaseStyle
-	return m.mainViewport.View()
+	if hdr == "" {
+		return MainPanelStyle.Width(w).Height(h).Render(rows)
+	}
+	return lipgloss.JoinVertical(lipgloss.Top, hdr, m.mainViewport.View())
 }
 
-func (m Model) renderContainerList(w, h int) string {
+func (m Model) renderContainerList(w, h int) (string, string) {
 	colW := w
 	if m.loading && len(m.containers) == 0 {
-		return MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" Waiting for Docker…"))
+		return "", MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" Waiting for Docker…"))
 	}
 	if len(m.containers) == 0 {
-		return MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No containers found"))
+		return "", MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No containers found"))
 	}
 	hdr := fmt.Sprintf("     %-29s %-29s  %-27s  %-30s", "NAME", "STATUS", "IMAGE", "PORTS")
 	hdr = hdr + strings.Repeat(" ", colW-len([]rune(hdr)))
@@ -338,18 +341,16 @@ func (m Model) renderContainerList(w, h int) string {
 			bgStyle.Foreground(t.Foreground).Render(rest)
 		rows = append(rows, row)
 	}
-	return MainPanelStyle.Width(w).Height(h).Render(
-		lipgloss.JoinVertical(lipgloss.Top, header, sep, lipgloss.JoinVertical(lipgloss.Top, rows...)),
-	)
+	return header + "\n" + sep, lipgloss.JoinVertical(lipgloss.Top, rows...)
 }
 
-func (m Model) renderImageList(w, h int) string {
+func (m Model) renderImageList(w, h int) (string, string) {
 	colW := w
 	if m.loading && len(m.images) == 0 {
-		return MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" Loading images…"))
+		return "", MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" Loading images…"))
 	}
 	if len(m.images) == 0 {
-		return MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No images found"))
+		return "", MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No images found"))
 	}
 
 	hdr := fmt.Sprintf("     %-42s %-16s  %-20s  %-14s", "REPOSITORY:TAG", "IMAGE ID", "CREATED", "SIZE")
@@ -400,9 +401,7 @@ func (m Model) renderImageList(w, h int) string {
 			bgStyle.Foreground(t.Foreground).Render(string(runes[1:]))
 		rows = append(rows, row)
 	}
-	return MainPanelStyle.Width(w).Height(h).Render(
-		lipgloss.JoinVertical(lipgloss.Top, header, sep, lipgloss.JoinVertical(lipgloss.Top, rows...)),
-	)
+	return header + "\n" + sep, lipgloss.JoinVertical(lipgloss.Top, rows...)
 }
 
 func formatImageSize(bytes int64) string {
@@ -423,13 +422,13 @@ func formatCreated(created int64) string {
 	return t.Format("2006-01-02")
 }
 
-func (m Model) renderVolumeList(w, h int) string {
+func (m Model) renderVolumeList(w, h int) (string, string) {
 	colW := w
 	if m.loading && len(m.volumes) == 0 {
-		return MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" Loading volumes…"))
+		return "", MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" Loading volumes…"))
 	}
 	if len(m.volumes) == 0 {
-		return MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No volumes found"))
+		return "", MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No volumes found"))
 	}
 
 	hdr := fmt.Sprintf("     %-24s %-16s  %-30s  %-14s", "NAME", "DRIVER", "MOUNTPOINT", "SCOPE")
@@ -468,18 +467,16 @@ func (m Model) renderVolumeList(w, h int) string {
 			bgStyle.Foreground(t.Foreground).Render(string(runes[1:]))
 		rows = append(rows, row)
 	}
-	return MainPanelStyle.Width(w).Height(h).Render(
-		lipgloss.JoinVertical(lipgloss.Top, header, sep, lipgloss.JoinVertical(lipgloss.Top, rows...)),
-	)
+	return header + "\n" + sep, lipgloss.JoinVertical(lipgloss.Top, rows...)
 }
 
-func (m Model) renderNetworkList(w, h int) string {
+func (m Model) renderNetworkList(w, h int) (string, string) {
 	colW := w
 	if m.loading && len(m.networks) == 0 {
-		return MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" Loading networks…"))
+		return "", MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" Loading networks…"))
 	}
 	if len(m.networks) == 0 {
-		return MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No networks found"))
+		return "", MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No networks found"))
 	}
 
 	hdr := fmt.Sprintf("     %-28s %-16s  %-16s  %-16s", "NAME", "DRIVER", "ID", "SCOPE")
@@ -521,9 +518,7 @@ func (m Model) renderNetworkList(w, h int) string {
 			bgStyle.Foreground(t.Foreground).Render(string(runes[1:]))
 		rows = append(rows, row)
 	}
-	return MainPanelStyle.Width(w).Height(h).Render(
-		lipgloss.JoinVertical(lipgloss.Top, header, sep, lipgloss.JoinVertical(lipgloss.Top, rows...)),
-	)
+	return header + "\n" + sep, lipgloss.JoinVertical(lipgloss.Top, rows...)
 }
 
 func (m Model) renderLogView() string {
@@ -600,12 +595,12 @@ func (m *Model) scrollToSelected() {
 	if vh <= 0 {
 		return
 	}
-	rowY := 2 + m.selectedIdx
+	rowY := m.selectedIdx
 	yOff := m.mainYOff
-	if rowY <= 2 {
+	if rowY <= 0 {
 		m.mainYOff = 0
 	} else if rowY < yOff {
-		m.mainYOff = rowY - 1
+		m.mainYOff = rowY
 	} else if rowY >= yOff+vh-1 {
 		m.mainYOff = rowY - vh + 2
 	}
