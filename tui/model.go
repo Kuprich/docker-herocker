@@ -295,17 +295,19 @@ func (m Model) renderMain() string {
 
 func (m Model) renderScrollbar() string {
 	vh := m.mainViewport.Height
-	if vh <= 0 {
-		return ""
-	}
-	if m.mainRows <= vh {
+	if vh <= 0 || m.mainRows <= vh {
 		return BaseStyle.Width(1).Height(vh).Render(" ")
 	}
+	thumbH := 3
+	if vh < thumbH {
+		thumbH = vh
+	}
+	maxThumb := vh - thumbH
 	pct := m.mainViewport.ScrollPercent()
-	thumbPos := int(pct * float64(vh-1))
+	thumbPos := int(pct * float64(maxThumb))
 	var sb strings.Builder
 	for i := 0; i < vh; i++ {
-		if i == thumbPos {
+		if i >= thumbPos && i < thumbPos+thumbH {
 			sb.WriteString(lipgloss.NewStyle().Background(t.Border).Foreground(t.Muted).Width(1).Render(" "))
 		} else {
 			sb.WriteString(lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Width(1).Render(" "))
