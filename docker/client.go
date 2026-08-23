@@ -35,6 +35,25 @@ type Image struct {
 	Size      int64    `json:"Size"`
 }
 
+type Volume struct {
+	Name       string `json:"Name"`
+	Driver     string `json:"Driver"`
+	Mountpoint string `json:"Mountpoint"`
+	CreatedAt  string `json:"CreatedAt"`
+	Scope      string `json:"Scope"`
+}
+
+type volumeListResponse struct {
+	Volumes []Volume `json:"Volumes"`
+}
+
+type Network struct {
+	ID     string `json:"Id"`
+	Name   string `json:"Name"`
+	Driver string `json:"Driver"`
+	Scope  string `json:"Scope"`
+}
+
 type versionInfo struct {
 	APIVersion string `json:"ApiVersion"`
 }
@@ -153,6 +172,34 @@ func (c *Client) ListImages(all bool) ([]Image, error) {
 		return nil, fmt.Errorf("decoding images: %w", err)
 	}
 	return images, nil
+}
+
+func (c *Client) ListVolumes() ([]Volume, error) {
+	resp, err := c.do("GET", "/volumes", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var res volumeListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return nil, fmt.Errorf("decoding volumes: %w", err)
+	}
+	return res.Volumes, nil
+}
+
+func (c *Client) ListNetworks() ([]Network, error) {
+	resp, err := c.do("GET", "/networks", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var networks []Network
+	if err := json.NewDecoder(resp.Body).Decode(&networks); err != nil {
+		return nil, fmt.Errorf("decoding networks: %w", err)
+	}
+	return networks, nil
 }
 
 func (c *Client) StartContainer(id string) error {

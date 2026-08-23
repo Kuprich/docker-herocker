@@ -79,7 +79,7 @@ var keys = keyMap{
 	),
 	Four: key.NewBinding(
 		key.WithKeys("4"),
-		key.WithHelp("4", "compose"),
+		key.WithHelp("4", "networks"),
 	),
 }
 

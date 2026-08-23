@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,10 +29,13 @@ const (
 	tabContainers tab = iota
 	tabImages
 	tabVolumes
+	tabNetworks
 )
 
 type containerMsg []docker.Container
 type imageMsg []docker.Image
+type volumeMsg []docker.Volume
+type networkMsg []docker.Network
 type errMsg struct{ err error }
 type logMsg string
 
@@ -40,6 +44,8 @@ type Model struct {
 
 	containers  []docker.Container
 	images      []docker.Image
+	volumes     []docker.Volume
+	networks    []docker.Network
 	selectedIdx int
 	activePanel panel
 	activeTab   tab
@@ -126,7 +132,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeTab = tabVolumes
 			return m, m.refreshNow()
 		case key.Matches(msg, keys.Four):
-			m.activeTab = 3
+			m.activeTab = tabNetworks
 			return m, m.refreshNow()
 		}
 
@@ -142,6 +148,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.images = msg
 		m.loading = false
 		if m.selectedIdx >= len(m.images) {
+			m.selectedIdx = 0
+		}
+		return m, m.refreshDelayed()
+
+	case volumeMsg:
+		m.volumes = msg
+		m.loading = false
+		if m.selectedIdx >= len(m.volumes) {
+			m.selectedIdx = 0
+		}
+		return m, m.refreshDelayed()
+
+	case networkMsg:
+		m.networks = msg
+		m.loading = false
+		if m.selectedIdx >= len(m.networks) {
 			m.selectedIdx = 0
 		}
 		return m, m.refreshDelayed()
@@ -191,7 +213,7 @@ func (m Model) renderHelpBar() string {
 }
 
 func (m Model) renderTabBar() string {
-	items := []string{"[1] Containers", "[2] Images", "[3] Volumes", "[4] Compose"}
+	items := []string{"[1] Containers", "[2] Images", "[3] Volumes", "[4] Networks"}
 	var tabs []string
 	for i, item := range items {
 		if i == int(m.activeTab) {
@@ -222,6 +244,10 @@ func (m Model) renderMain() string {
 	switch m.activeTab {
 	case tabImages:
 		return m.renderImageList(w, h)
+	case tabVolumes:
+		return m.renderVolumeList(w, h)
+	case tabNetworks:
+		return m.renderNetworkList(w, h)
 	default:
 		return m.renderContainerList(w, h)
 	}
@@ -369,6 +395,109 @@ func formatCreated(created int64) string {
 	return t.Format("2006-01-02")
 }
 
+func (m Model) renderVolumeList(w, h int) string {
+	colW := w
+	if m.loading && len(m.volumes) == 0 {
+		return MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" Loading volumes…"))
+	}
+	if len(m.volumes) == 0 {
+		return MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No volumes found"))
+	}
+
+	hdr := fmt.Sprintf("     %-24s %-16s  %-30s  %-14s", "NAME", "DRIVER", "MOUNTPOINT", "SCOPE")
+	padding := colW - len([]rune(hdr))
+	if padding > 0 {
+		hdr += strings.Repeat(" ", padding)
+	}
+	header := lipgloss.NewStyle().Background(t.Background).Foreground(t.Accent).Bold(true).Render(hdr)
+	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Muted).Render(strings.Repeat("─", colW))
+
+	var rows []string
+	for i := range m.volumes {
+		v := &m.volumes[i]
+		name := Truncate(v.Name, 24)
+		driver := Truncate(v.Driver, 16)
+		mp := Truncate(v.Mountpoint, 30)
+		scope := Truncate(v.Scope, 14)
+
+		line := fmt.Sprintf(" %s  %-24s %-16s  %-30s  %-14s", "●", name, driver, mp, scope)
+		runes := []rune(line)
+		pad := colW - len(runes)
+		if pad > 0 {
+			line += strings.Repeat(" ", pad)
+			runes = []rune(line)
+		} else if pad < 0 {
+			runes = runes[:max(colW, 3)]
+			line = string(runes)
+		}
+
+		bg := t.Background
+		if i == m.selectedIdx {
+			bg = lipgloss.Color("#1c2d1f")
+		}
+		bgStyle := lipgloss.NewStyle().Background(bg)
+		row := bgStyle.Render(" ") +
+			bgStyle.Foreground(t.Foreground).Render(string(runes[1:]))
+		rows = append(rows, row)
+	}
+	return MainPanelStyle.Width(w).Height(h).Render(
+		lipgloss.JoinVertical(lipgloss.Top, header, sep, lipgloss.JoinVertical(lipgloss.Top, rows...)),
+	)
+}
+
+func (m Model) renderNetworkList(w, h int) string {
+	colW := w
+	if m.loading && len(m.networks) == 0 {
+		return MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" Loading networks…"))
+	}
+	if len(m.networks) == 0 {
+		return MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No networks found"))
+	}
+
+	hdr := fmt.Sprintf("     %-28s %-16s  %-16s  %-16s", "NAME", "DRIVER", "ID", "SCOPE")
+	padding := colW - len([]rune(hdr))
+	if padding > 0 {
+		hdr += strings.Repeat(" ", padding)
+	}
+	header := lipgloss.NewStyle().Background(t.Background).Foreground(t.Accent).Bold(true).Render(hdr)
+	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Muted).Render(strings.Repeat("─", colW))
+
+	var rows []string
+	for i := range m.networks {
+		n := &m.networks[i]
+		name := Truncate(n.Name, 28)
+		driver := Truncate(n.Driver, 16)
+		shortID := Truncate(n.ID, 16)
+		if len(shortID) > 12 {
+			shortID = shortID[:12]
+		}
+		scope := Truncate(n.Scope, 16)
+
+		line := fmt.Sprintf(" %s  %-28s %-16s  %-16s  %-16s", "●", name, driver, shortID, scope)
+		runes := []rune(line)
+		pad := colW - len(runes)
+		if pad > 0 {
+			line += strings.Repeat(" ", pad)
+			runes = []rune(line)
+		} else if pad < 0 {
+			runes = runes[:max(colW, 3)]
+			line = string(runes)
+		}
+
+		bg := t.Background
+		if i == m.selectedIdx {
+			bg = lipgloss.Color("#1c2d1f")
+		}
+		bgStyle := lipgloss.NewStyle().Background(bg)
+		row := bgStyle.Render(" ") +
+			bgStyle.Foreground(t.Foreground).Render(string(runes[1:]))
+		rows = append(rows, row)
+	}
+	return MainPanelStyle.Width(w).Height(h).Render(
+		lipgloss.JoinVertical(lipgloss.Top, header, sep, lipgloss.JoinVertical(lipgloss.Top, rows...)),
+	)
+}
+
 func (m Model) renderLogView() string {
 	w := m.width
 	h := m.height - tabBarHeight - helpBarHeight
@@ -423,8 +552,13 @@ func (m *Model) moveUp() {
 
 func (m *Model) moveDown() {
 	maxIdx := len(m.containers) - 1
-	if m.activeTab == tabImages {
+	switch m.activeTab {
+	case tabImages:
 		maxIdx = len(m.images) - 1
+	case tabVolumes:
+		maxIdx = len(m.volumes) - 1
+	case tabNetworks:
+		maxIdx = len(m.networks) - 1
 	}
 	if m.selectedIdx < maxIdx {
 		m.selectedIdx++
@@ -443,6 +577,24 @@ func (m Model) refreshNow() tea.Cmd {
 				return errMsg{err}
 			}
 			return imageMsg(images)
+		case tabVolumes:
+			volumes, err := m.docker.ListVolumes()
+			if err != nil {
+				return errMsg{err}
+			}
+			sort.Slice(volumes, func(i, j int) bool {
+				return volumes[i].Name < volumes[j].Name
+			})
+			return volumeMsg(volumes)
+		case tabNetworks:
+			networks, err := m.docker.ListNetworks()
+			if err != nil {
+				return errMsg{err}
+			}
+			sort.Slice(networks, func(i, j int) bool {
+				return networks[i].Name < networks[j].Name
+			})
+			return networkMsg(networks)
 		default:
 			containers, err := m.docker.ListContainers(m.showAll)
 			if err != nil {
