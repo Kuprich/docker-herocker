@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -65,7 +64,7 @@ func New(dcli *docker.Client) Model {
 		docker:      dcli,
 		spinner:     s,
 		help:        help.New(),
-		showAll:     false,
+		showAll:     true,
 		selectedIdx: 0,
 		activePanel: panelMain,
 	}
@@ -160,32 +159,6 @@ func (m Model) View() string {
 
 // ---- render helpers ----
 
-func (m Model) renderStatusBar() string {
-	left := " Docker"
-	running := 0
-	for _, c := range m.containers {
-		if c.State == "running" {
-			running++
-		}
-	}
-	center := fmt.Sprintf(" running: %d / total: %d ", running, len(m.containers))
-	if m.err != nil {
-		center = " ⚠ disconnected from Docker — check daemon "
-	}
-	right := ""
-	if m.loading {
-		right = m.spinner.View()
-	}
-	if m.showAll {
-		right += " [all]"
-	}
-	pad := m.width - lipgloss.Width(left) - lipgloss.Width(center) - lipgloss.Width(right)
-	if pad < 0 {
-		pad = 0
-	}
-	return StatusBarStyle.Width(m.width).Render(left + strings.Repeat(" ", pad) + center + right)
-}
-
 func (m Model) renderHelpBar() string {
 	if m.helpOn {
 		return HelpBarStyle.Width(m.width).Render(m.help.View(keys))
@@ -239,14 +212,38 @@ func (m Model) renderMain() string {
 		name := Truncate(strings.TrimPrefix(c.Names[0], "/"), 20)
 		status := Truncate(c.Status, 12)
 		img := Truncate(c.Image, 20)
-		dot := StatusDot(c.State)
-		line := fmt.Sprintf(" %s  %-20s %-10s %s", dot, name, status, img)
 
-		if i == m.selectedIdx {
-			rows = append(rows, SelectedRow.Width(colW).Render(line))
-		} else {
-			rows = append(rows, TableRow.Render(line))
+		dotColor := t.Muted
+		dotChar := "●"
+		switch c.State {
+		case "running":
+			dotColor = t.Success
+		case "paused":
+			dotColor = t.Warning
+		case "exited":
+			dotColor = t.Muted
+			dotChar = "○"
+		default:
+			dotColor = t.Error
 		}
+
+		bg := t.Background
+		if i == m.selectedIdx {
+			bg = lipgloss.Color("#1c2d1f")
+		}
+		rowStyle := lipgloss.NewStyle().Background(bg).Foreground(t.Foreground)
+
+		row := lipgloss.JoinHorizontal(lipgloss.Top,
+			rowStyle.Render(" "),
+			rowStyle.Copy().Foreground(dotColor).Render(dotChar),
+			rowStyle.Render("  "),
+			rowStyle.Width(20).Render(name),
+			rowStyle.Render(" "),
+			rowStyle.Width(12).Render(status),
+			rowStyle.Render("  "),
+			rowStyle.Render(img),
+		)
+		rows = append(rows, rowStyle.Width(colW).Render(row))
 	}
 	return MainPanelStyle.Width(w).Height(h).Render(
 		lipgloss.JoinVertical(lipgloss.Top, header, sep, lipgloss.JoinVertical(lipgloss.Top, rows...)),
