@@ -56,6 +56,7 @@ type Model struct {
 	logContent   string
 	logViewport  viewport.Model
 	mainViewport viewport.Model
+	mainYOff     int
 
 	spinner spinner.Model
 	help    help.Model
@@ -130,15 +131,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case key.Matches(msg, keys.One):
 			m.activeTab = tabContainers
+			m.mainYOff = 0
 			return m, m.refreshNow()
 		case key.Matches(msg, keys.Two):
 			m.activeTab = tabImages
+			m.mainYOff = 0
 			return m, m.refreshNow()
 		case key.Matches(msg, keys.Three):
 			m.activeTab = tabVolumes
+			m.mainYOff = 0
 			return m, m.refreshNow()
 		case key.Matches(msg, keys.Four):
 			m.activeTab = tabNetworks
+			m.mainYOff = 0
 			return m, m.refreshNow()
 		}
 
@@ -193,10 +198,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	var cmd tea.Cmd
-	m.mainViewport, cmd = m.mainViewport.Update(msg)
-	m.logViewport, _ = m.logViewport.Update(msg)
-	return m, cmd
+	if _, isKey := msg.(tea.KeyMsg); !isKey {
+		var cmd tea.Cmd
+		m.mainViewport, cmd = m.mainViewport.Update(msg)
+		m.logViewport, _ = m.logViewport.Update(msg)
+		return m, cmd
+	}
+	return m, nil
 }
 
 func (m Model) View() string {
@@ -268,6 +276,7 @@ func (m Model) renderMain() string {
 	m.mainViewport.Width = w
 	m.mainViewport.Height = h
 	m.mainViewport.SetContent(content)
+	m.mainViewport.SetYOffset(m.mainYOff)
 	m.mainViewport.Style = BaseStyle
 	return m.mainViewport.View()
 }
@@ -592,13 +601,13 @@ func (m *Model) scrollToSelected() {
 		return
 	}
 	rowY := 2 + m.selectedIdx
-	yOff := m.mainViewport.YOffset
+	yOff := m.mainYOff
 	if rowY <= 2 {
-		m.mainViewport.SetYOffset(0)
+		m.mainYOff = 0
 	} else if rowY < yOff {
-		m.mainViewport.SetYOffset(rowY - 1)
+		m.mainYOff = rowY - 1
 	} else if rowY >= yOff+vh-1 {
-		m.mainViewport.SetYOffset(rowY - vh + 2)
+		m.mainYOff = rowY - vh + 2
 	}
 }
 
