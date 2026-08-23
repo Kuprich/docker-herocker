@@ -204,14 +204,14 @@ func (m Model) renderMain() string {
 	}
 
 	colW := w - 4
-	header := TableHeader.Width(colW).Render("  NAME                  STATUS     IMAGE")
+	header := TableHeader.Width(colW).Render("    NAME                          STATUS                IMAGE")
 	sep := BaseStyle.Foreground(t.Muted).Render(strings.Repeat("─", colW))
 
 	var rows []string
 	for i, c := range m.containers {
-		name := Truncate(strings.TrimPrefix(c.Names[0], "/"), 20)
-		status := Truncate(c.Status, 12)
-		img := Truncate(c.Image, 20)
+		name := Truncate(strings.TrimPrefix(c.Names[0], "/"), 30)
+		status := Truncate(c.Status, 22)
+		img := Truncate(c.Image, 30)
 
 		dotColor := t.Muted
 		dotChar := "●"
@@ -237,11 +237,11 @@ func (m Model) renderMain() string {
 			rowStyle.Render(" "),
 			rowStyle.Copy().Foreground(dotColor).Render(dotChar),
 			rowStyle.Render("  "),
-			rowStyle.Width(20).Render(name),
+			rowStyle.Width(30).Render(name),
 			rowStyle.Render(" "),
-			rowStyle.Width(12).Render(status),
+			rowStyle.Width(22).Render(status),
 			rowStyle.Render("  "),
-			rowStyle.Render(img),
+			rowStyle.Width(30).Render(img),
 		)
 		rows = append(rows, rowStyle.Width(colW).Render(row))
 	}
