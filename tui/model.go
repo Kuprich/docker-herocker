@@ -205,16 +205,17 @@ func (m Model) renderMain() string {
 	}
 
 	colW := w
-	hdr := fmt.Sprintf("     %-30s %-32s  %-30s", "NAME", "STATUS", "IMAGE")
+	hdr := fmt.Sprintf("     %-29s %-29s  %-27s  %-30s", "NAME", "STATUS", "IMAGE", "PORTS")
 	hdr = hdr + strings.Repeat(" ", colW-len([]rune(hdr)))
 	header := lipgloss.NewStyle().Background(t.Background).Foreground(t.Accent).Bold(true).Render(hdr)
 	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Muted).Render(strings.Repeat("─", colW))
 
 	var rows []string
 	for i, c := range m.containers {
-		name := Truncate(strings.TrimPrefix(c.Names[0], "/"), 30)
-		status := Truncate(c.Status, 32)
-		img := Truncate(c.Image, 30)
+		name := Truncate(strings.TrimPrefix(c.Names[0], "/"), 29)
+		status := Truncate(c.Status, 29)
+		ports := formatPorts(c.Ports)
+		img := Truncate(c.Image, 27)
 
 		dot := "●"
 		dotColor := t.Muted
@@ -230,13 +231,16 @@ func (m Model) renderMain() string {
 			dotColor = t.Error
 		}
 
-		line := fmt.Sprintf(" %s  %-30s %-32s  %-30s", dot, name, status, img)
+		line := fmt.Sprintf(" %s  %-29s %-29s  %-27s  %-30s", dot, name, status, img, ports)
 		runes := []rune(line)
 		padding := colW - len(runes)
 		if padding > 0 {
 			line = line + strings.Repeat(" ", padding)
+			runes = []rune(line)
+		} else if padding < 0 {
+			runes = runes[:max(colW, 3)]
+			line = string(runes)
 		}
-		runes = []rune(line)
 		dotRune := string(runes[1:2])
 		rest := string(runes[2:])
 
@@ -274,6 +278,21 @@ func (m Model) renderLogView() string {
 		m.logViewport.View(),
 	)
 	return MainPanelStyle.Width(w).Height(h).Render(content)
+}
+
+func formatPorts(ports []docker.Port) string {
+	if len(ports) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, p := range ports {
+		if p.PublicPort != 0 {
+			parts = append(parts, fmt.Sprintf("%d->%d/%s", p.PublicPort, p.PrivatePort, p.Type))
+		} else {
+			parts = append(parts, fmt.Sprintf("%d/%s", p.PrivatePort, p.Type))
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 // ---- navigation ----
