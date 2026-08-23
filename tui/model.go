@@ -85,7 +85,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.logViewport = viewport.New(
 			msg.Width-sidebarWidth-5,
-			msg.Height-statusBarHeight-helpBarHeight-4,
+			msg.Height-helpBarHeight-4,
 		)
 		m.logViewport.Style = BaseStyle
 		m.ready = true
@@ -147,10 +147,14 @@ func (m Model) View() string {
 	if !m.ready {
 		return "\n  Initializing…"
 	}
-	return lipgloss.JoinVertical(lipgloss.Top,
-		m.renderStatusBar(),
+	content := lipgloss.JoinVertical(lipgloss.Top,
 		lipgloss.JoinHorizontal(lipgloss.Top, m.renderSidebar(), m.renderMain()),
 		m.renderHelpBar(),
+	)
+	return lipgloss.Place(m.width, m.height,
+		lipgloss.Top, lipgloss.Left,
+		content,
+		lipgloss.WithWhitespaceBackground(t.Background),
 	)
 }
 
@@ -193,7 +197,6 @@ func (m Model) renderHelpBar() string {
 func (m Model) renderSidebar() string {
 	items := []string{"Containers", "Images", "Volumes", "Compose"}
 	var lines []string
-	lines = append(lines, BaseStyle.Copy().Foreground(t.Muted).Bold(true).Padding(0, 1).Render(" NAVIGATION"))
 	lines = append(lines, "")
 	for i, item := range items {
 		s := SidebarItem.Copy()
@@ -202,11 +205,11 @@ func (m Model) renderSidebar() string {
 		} else if i == int(m.activeTab) {
 			s = s.Foreground(t.Accent)
 		}
-		lines = append(lines, s.Render(" "+item))
+		lines = append(lines, s.Width(sidebarWidth).Render(" "+item))
 	}
 	return SidebarStyle.
 		Width(sidebarWidth).
-		Height(m.height - statusBarHeight - helpBarHeight).
+		Height(m.height - helpBarHeight).
 		Render(lipgloss.JoinVertical(lipgloss.Top, lines...))
 }
 
@@ -215,7 +218,7 @@ func (m Model) renderMain() string {
 		return m.renderLogView()
 	}
 	w := m.width - sidebarWidth - 3
-	h := m.height - statusBarHeight - helpBarHeight
+	h := m.height - helpBarHeight
 
 	if m.err != nil {
 		return MainPanelStyle.Width(w).Height(h).Render(errorStyle.Render(m.err.Error()))
@@ -227,9 +230,9 @@ func (m Model) renderMain() string {
 		return MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No containers found"))
 	}
 
-	colW := w - 6
+	colW := w - 4
 	header := TableHeader.Width(colW).Render("  NAME                  STATUS     IMAGE")
-	sep := strings.Repeat("─", colW)
+	sep := BaseStyle.Foreground(t.Muted).Render(strings.Repeat("─", colW))
 
 	var rows []string
 	for i, c := range m.containers {
@@ -252,7 +255,7 @@ func (m Model) renderMain() string {
 
 func (m Model) renderLogView() string {
 	w := m.width - sidebarWidth - 3
-	h := m.height - statusBarHeight - helpBarHeight
+	h := m.height - helpBarHeight
 
 	if len(m.containers) == 0 || m.selectedIdx >= len(m.containers) {
 		return MainPanelStyle.Width(w).Height(h).Render("")
@@ -266,7 +269,6 @@ func (m Model) renderLogView() string {
 
 	content := lipgloss.JoinVertical(lipgloss.Top,
 		header,
-		strings.Repeat("─", w-2),
 		m.logViewport.View(),
 	)
 	return MainPanelStyle.Width(w).Height(h).Render(content)

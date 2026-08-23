@@ -8,32 +8,17 @@ import (
 var t = config.DefaultTheme()
 
 var (
-	AppStyle = lipgloss.NewStyle().
-		Background(t.Background).
-		Height(1)
-
 	BaseStyle = lipgloss.NewStyle().
 		Background(t.Background).
 		Foreground(t.Foreground)
 
 	SidebarStyle = lipgloss.NewStyle().
 		Background(t.Surface).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(t.Border).
 		Width(20)
-
-	SidebarActiveStyle = SidebarStyle.Copy().
-		BorderForeground(t.Accent)
 
 	MainPanelStyle = lipgloss.NewStyle().
 		Background(t.Background).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(t.Border).
-		Padding(1, 1).
-		MarginLeft(1)
-
-	MainPanelActiveStyle = MainPanelStyle.Copy().
-		BorderForeground(t.Accent)
+		Padding(0, 1)
 
 	StatusBarStyle = lipgloss.NewStyle().
 		Background(lipgloss.Color("#21262d")).
@@ -48,51 +33,48 @@ var (
 		Height(1)
 
 	StatusDotRunning = lipgloss.NewStyle().
-			Foreground(t.Success).
-			SetString("●").
-			String()
+		Foreground(t.Success).
+		SetString("●").
+		String()
 
 	StatusDotStopped = lipgloss.NewStyle().
-			Foreground(t.Error).
-			SetString("●").
-			String()
+		Foreground(t.Error).
+		SetString("●").
+		String()
 
 	StatusDotPaused = lipgloss.NewStyle().
-			Foreground(t.Warning).
-			SetString("●").
-			String()
+		Foreground(t.Warning).
+		SetString("●").
+		String()
 
 	StatusDotExited = lipgloss.NewStyle().
-			Foreground(t.Muted).
-			SetString("○").
-			String()
+		Foreground(t.Muted).
+		SetString("○").
+		String()
 
-SelectedRow = lipgloss.NewStyle().
+	SelectedRow = lipgloss.NewStyle().
 		Background(lipgloss.Color("#1c2d1f")).
 		Foreground(t.Foreground).
 		Padding(0, 1)
 
 	TableHeader = lipgloss.NewStyle().
-			Foreground(t.Accent).
-			Bold(true).
-			Padding(0, 1)
+		Background(t.Background).
+		Foreground(t.Accent).
+		Bold(true).
+		Padding(0, 1)
 
 	TableRow = lipgloss.NewStyle().
-			Padding(0, 1)
+		Background(t.Background).
+		Padding(0, 1)
 
 	SidebarItem = lipgloss.NewStyle().
-			Padding(0, 1).
-			Width(18)
+		Background(t.Surface).
+		Padding(0, 0)
 
-SidebarItemActive = SidebarItem.Copy().
+	SidebarItemActive = SidebarItem.Copy().
 		Background(lipgloss.Color("#1c2d1f")).
 		Foreground(t.Accent).
 		Bold(true)
-
-	Divider = lipgloss.NewStyle().
-		Foreground(t.Muted).
-		SetString("│").
-		String()
 )
 
 func StatusDot(state string) string {
