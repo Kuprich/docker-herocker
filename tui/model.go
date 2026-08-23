@@ -1,0 +1,384 @@
+package tui
+
+import (
+	"fmt"
+	"io"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/kuri4/dockerherocker/docker"
+)
+
+type panel int
+
+const (
+	panelSidebar panel = iota
+	panelMain
+	panelLogs
+)
+
+type tab int
+
+const (
+	tabContainers tab = iota
+	tabImages
+	tabVolumes
+)
+
+type containerMsg []docker.Container
+type errMsg struct{ err error }
+type logMsg string
+
+type Model struct {
+	docker   *docker.Client
+
+	containers  []docker.Container
+	selectedIdx int
+	activePanel panel
+	activeTab   tab
+	showAll     bool
+	loading     bool
+	err         error
+
+	logContent  string
+	logViewport viewport.Model
+
+	spinner spinner.Model
+	help    help.Model
+	helpOn  bool
+	ready   bool
+	width   int
+	height  int
+}
+
+func New(dcli *docker.Client) Model {
+	s := spinner.New()
+	s.Style = BaseStyle.Copy().Foreground(t.Accent)
+	s.Spinner = spinner.Dot
+	return Model{
+		docker:      dcli,
+		spinner:     s,
+		help:        help.New(),
+		showAll:     false,
+		selectedIdx: 0,
+		activePanel: panelMain,
+	}
+}
+
+func (m Model) Init() tea.Cmd {
+	return tea.Batch(
+		m.refreshNow(),
+		m.spinner.Tick,
+	)
+}
+
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.logViewport = viewport.New(
+			msg.Width-sidebarWidth-5,
+			msg.Height-statusBarHeight-helpBarHeight-4,
+		)
+		m.logViewport.Style = BaseStyle
+		m.ready = true
+
+	case tea.KeyMsg:
+		switch {
+		case key.Matches(msg, keys.Quit):
+			return m, tea.Quit
+		case key.Matches(msg, keys.Help):
+			m.helpOn = !m.helpOn
+		case key.Matches(msg, keys.Tab):
+			m.cyclePanel()
+		case key.Matches(msg, keys.Up):
+			m.moveUp()
+		case key.Matches(msg, keys.Down):
+			m.moveDown()
+		case key.Matches(msg, keys.ToggleAll):
+			m.showAll = !m.showAll
+			return m, m.refreshNow()
+		case key.Matches(msg, keys.StartStop):
+			return m, m.toggleContainer()
+		case key.Matches(msg, keys.Restart):
+			return m, m.restartContainer()
+		case key.Matches(msg, keys.ViewLogs):
+			return m, m.handleViewLogs()
+		case key.Matches(msg, keys.Back):
+			if m.activePanel == panelLogs {
+				m.activePanel = panelMain
+			}
+		}
+
+	case containerMsg:
+		m.containers = msg
+		m.loading = false
+		if m.selectedIdx >= len(m.containers) {
+			m.selectedIdx = 0
+		}
+		return m, m.refreshDelayed()
+
+	case logMsg:
+		m.logContent = string(msg)
+		m.logViewport.SetContent(m.logContent)
+		m.logViewport.GotoBottom()
+
+	case errMsg:
+		m.err = msg.err
+		m.loading = false
+
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
+	}
+
+	return m, nil
+}
+
+func (m Model) View() string {
+	if !m.ready {
+		return "\n  Initializing…"
+	}
+	return lipgloss.JoinVertical(lipgloss.Top,
+		m.renderStatusBar(),
+		lipgloss.JoinHorizontal(lipgloss.Top, m.renderSidebar(), m.renderMain()),
+		m.renderHelpBar(),
+	)
+}
+
+// ---- render helpers ----
+
+func (m Model) renderStatusBar() string {
+	left := " Docker"
+	running := 0
+	for _, c := range m.containers {
+		if c.State == "running" {
+			running++
+		}
+	}
+	center := fmt.Sprintf(" running: %d / total: %d ", running, len(m.containers))
+	if m.err != nil {
+		center = " ⚠ disconnected from Docker — check daemon "
+	}
+	right := ""
+	if m.loading {
+		right = m.spinner.View()
+	}
+	if m.showAll {
+		right += " [all]"
+	}
+	pad := m.width - lipgloss.Width(left) - lipgloss.Width(center) - lipgloss.Width(right)
+	if pad < 0 {
+		pad = 0
+	}
+	return StatusBarStyle.Width(m.width).Render(left + strings.Repeat(" ", pad) + center + right)
+}
+
+func (m Model) renderHelpBar() string {
+	if m.helpOn {
+		return HelpBarStyle.Width(m.width).Render(m.help.View(keys))
+	}
+	h := " ↑/↓  navigate  •  Tab  panel  •  Enter  logs  •  Space  start/stop  •  r  restart  •  a  all  •  ?  help"
+	return HelpBarStyle.Width(m.width).Render(h)
+}
+
+func (m Model) renderSidebar() string {
+	items := []string{"Containers", "Images", "Volumes", "Compose"}
+	var lines []string
+	lines = append(lines, BaseStyle.Copy().Foreground(t.Muted).Bold(true).Padding(0, 1).Render(" NAVIGATION"))
+	lines = append(lines, "")
+	for i, item := range items {
+		s := SidebarItem.Copy()
+		if i == int(m.activeTab) && m.activePanel == panelSidebar {
+			s = SidebarItemActive.Copy()
+		} else if i == int(m.activeTab) {
+			s = s.Foreground(t.Accent)
+		}
+		lines = append(lines, s.Render(" "+item))
+	}
+	return SidebarStyle.
+		Width(sidebarWidth).
+		Height(m.height - statusBarHeight - helpBarHeight).
+		Render(lipgloss.JoinVertical(lipgloss.Top, lines...))
+}
+
+func (m Model) renderMain() string {
+	if m.activePanel == panelLogs {
+		return m.renderLogView()
+	}
+	w := m.width - sidebarWidth - 3
+	h := m.height - statusBarHeight - helpBarHeight
+
+	if m.err != nil {
+		return MainPanelStyle.Width(w).Height(h).Render(errorStyle.Render(m.err.Error()))
+	}
+	if m.loading && len(m.containers) == 0 {
+		return MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" Waiting for Docker…"))
+	}
+	if len(m.containers) == 0 {
+		return MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No containers found"))
+	}
+
+	colW := w - 6
+	header := TableHeader.Width(colW).Render("  NAME                  STATUS     IMAGE")
+	sep := strings.Repeat("─", colW)
+
+	var rows []string
+	for i, c := range m.containers {
+		name := Truncate(strings.TrimPrefix(c.Names[0], "/"), 20)
+		status := Truncate(c.Status, 12)
+		img := Truncate(c.Image, 20)
+		dot := StatusDot(c.State)
+		line := fmt.Sprintf(" %s  %-20s %-10s %s", dot, name, status, img)
+
+		if i == m.selectedIdx {
+			rows = append(rows, SelectedRow.Width(colW).Render(line))
+		} else {
+			rows = append(rows, TableRow.Render(line))
+		}
+	}
+	return MainPanelStyle.Width(w).Height(h).Render(
+		lipgloss.JoinVertical(lipgloss.Top, header, sep, lipgloss.JoinVertical(lipgloss.Top, rows...)),
+	)
+}
+
+func (m Model) renderLogView() string {
+	w := m.width - sidebarWidth - 3
+	h := m.height - statusBarHeight - helpBarHeight
+
+	if len(m.containers) == 0 || m.selectedIdx >= len(m.containers) {
+		return MainPanelStyle.Width(w).Height(h).Render("")
+	}
+	c := m.containers[m.selectedIdx]
+	name := strings.TrimPrefix(c.Names[0], "/")
+
+	header := BaseStyle.Copy().Foreground(t.Accent).Bold(true).Render(" Logs: ") +
+		BaseStyle.Copy().Bold(true).Render(name) +
+		BaseStyle.Copy().Foreground(t.Muted).Render("   Esc back ")
+
+	content := lipgloss.JoinVertical(lipgloss.Top,
+		header,
+		strings.Repeat("─", w-2),
+		m.logViewport.View(),
+	)
+	return MainPanelStyle.Width(w).Height(h).Render(content)
+}
+
+// ---- navigation ----
+
+func (m *Model) cyclePanel() {
+	switch m.activePanel {
+	case panelSidebar:
+		m.activePanel = panelMain
+	case panelMain, panelLogs:
+		m.activePanel = panelSidebar
+	}
+}
+
+func (m *Model) moveUp() {
+	switch m.activePanel {
+	case panelSidebar:
+		if m.activeTab > 0 {
+			m.activeTab--
+		}
+	case panelMain:
+		if m.selectedIdx > 0 {
+			m.selectedIdx--
+		}
+	}
+}
+
+func (m *Model) moveDown() {
+	switch m.activePanel {
+	case panelSidebar:
+		if int(m.activeTab) < 3 {
+			m.activeTab++
+		}
+	case panelMain:
+		if m.selectedIdx < len(m.containers)-1 {
+			m.selectedIdx++
+		}
+	}
+}
+
+// ---- commands ----
+
+func (m Model) refreshNow() tea.Cmd {
+	m.loading = true
+	return func() tea.Msg {
+		containers, err := m.docker.ListContainers(m.showAll)
+		if err != nil {
+			return errMsg{err}
+		}
+		return containerMsg(containers)
+	}
+}
+
+func (m Model) refreshDelayed() tea.Cmd {
+	return tea.Tick(2*time.Second, func(time.Time) tea.Msg {
+		return m.refreshNow()()
+	})
+}
+
+func (m Model) toggleContainer() tea.Cmd {
+	if m.selectedIdx >= len(m.containers) {
+		return nil
+	}
+	c := m.containers[m.selectedIdx]
+	return func() tea.Msg {
+		var err error
+		if c.State == "running" {
+			err = m.docker.StopContainer(c.ID)
+		} else {
+			err = m.docker.StartContainer(c.ID)
+		}
+		if err != nil {
+			return errMsg{err}
+		}
+		time.Sleep(500 * time.Millisecond)
+		return m.refreshNow()()
+	}
+}
+
+func (m Model) restartContainer() tea.Cmd {
+	if m.selectedIdx >= len(m.containers) {
+		return nil
+	}
+	c := m.containers[m.selectedIdx]
+	return func() tea.Msg {
+		err := m.docker.RestartContainer(c.ID)
+		if err != nil {
+			return errMsg{err}
+		}
+		time.Sleep(500 * time.Millisecond)
+		return m.refreshNow()()
+	}
+}
+
+func (m Model) handleViewLogs() tea.Cmd {
+	if m.selectedIdx >= len(m.containers) {
+		return nil
+	}
+	c := m.containers[m.selectedIdx]
+	m.activePanel = panelLogs
+	return func() tea.Msg {
+		reader, err := m.docker.ContainerLogs(c.ID, "100", false)
+		if err != nil {
+			return errMsg{err}
+		}
+		defer reader.Close()
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			return errMsg{err}
+		}
+		return logMsg(docker.StripDockerStreamHeaders(data))
+	}
+}
