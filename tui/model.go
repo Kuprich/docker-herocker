@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -190,7 +191,7 @@ func (m Model) renderMain() string {
 	if m.activePanel == panelLogs {
 		return m.renderLogView()
 	}
-	w := m.width - sidebarWidth - 3
+	w := m.width - sidebarWidth
 	h := m.height - helpBarHeight
 
 	if m.err != nil {
@@ -203,9 +204,11 @@ func (m Model) renderMain() string {
 		return MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No containers found"))
 	}
 
-	colW := w - 4
-	header := TableHeader.Width(colW).Render("    NAME                          STATUS                IMAGE")
-	sep := BaseStyle.Foreground(t.Muted).Render(strings.Repeat("─", colW))
+	colW := w
+	hdr := "    NAME                          STATUS                IMAGE"
+	hdr = hdr + strings.Repeat(" ", colW-len([]rune(hdr)))
+	header := lipgloss.NewStyle().Background(t.Background).Foreground(t.Accent).Bold(true).Render(hdr)
+	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Muted).Render(strings.Repeat("─", colW))
 
 	var rows []string
 	for i, c := range m.containers {
@@ -213,37 +216,20 @@ func (m Model) renderMain() string {
 		status := Truncate(c.Status, 22)
 		img := Truncate(c.Image, 30)
 
-		dotColor := t.Muted
-		dotChar := "●"
+		dot := "•"
 		switch c.State {
-		case "running":
-			dotColor = t.Success
-		case "paused":
-			dotColor = t.Warning
 		case "exited":
-			dotColor = t.Muted
-			dotChar = "○"
-		default:
-			dotColor = t.Error
+			dot = "∘"
 		}
+
+		line := fmt.Sprintf(" %s  %-30s %-22s  %-30s", dot, name, status, img)
+		line = line + strings.Repeat(" ", colW-len([]rune(line)))
 
 		bg := t.Background
 		if i == m.selectedIdx {
 			bg = lipgloss.Color("#1c2d1f")
 		}
-		rowStyle := lipgloss.NewStyle().Background(bg).Foreground(t.Foreground)
-
-		row := lipgloss.JoinHorizontal(lipgloss.Top,
-			rowStyle.Render(" "),
-			rowStyle.Copy().Foreground(dotColor).Render(dotChar),
-			rowStyle.Render("  "),
-			rowStyle.Width(30).Render(name),
-			rowStyle.Render(" "),
-			rowStyle.Width(22).Render(status),
-			rowStyle.Render("  "),
-			rowStyle.Width(30).Render(img),
-		)
-		rows = append(rows, rowStyle.Width(colW).Render(row))
+		rows = append(rows, lipgloss.NewStyle().Background(bg).Foreground(t.Foreground).Render(line))
 	}
 	return MainPanelStyle.Width(w).Height(h).Render(
 		lipgloss.JoinVertical(lipgloss.Top, header, sep, lipgloss.JoinVertical(lipgloss.Top, rows...)),
@@ -251,7 +237,7 @@ func (m Model) renderMain() string {
 }
 
 func (m Model) renderLogView() string {
-	w := m.width - sidebarWidth - 3
+	w := m.width - sidebarWidth
 	h := m.height - helpBarHeight
 
 	if len(m.containers) == 0 || m.selectedIdx >= len(m.containers) {

@@ -18,19 +18,13 @@ var (
 
 	MainPanelStyle = lipgloss.NewStyle().
 		Background(t.Background).
-		Padding(0, 1)
+		Padding(0, 0)
 
 	HelpBarStyle = lipgloss.NewStyle().
 		Background(t.Surface).
 		Foreground(t.Muted).
 		Padding(0, 1).
 		Height(1)
-
-	TableHeader = lipgloss.NewStyle().
-		Background(t.Background).
-		Foreground(t.Accent).
-		Bold(true).
-		Padding(0, 1)
 
 	SidebarItem = lipgloss.NewStyle().
 		Background(t.Surface).
