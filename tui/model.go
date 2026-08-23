@@ -53,8 +53,9 @@ type Model struct {
 	loading     bool
 	err         error
 
-	logContent  string
-	logViewport viewport.Model
+	logContent   string
+	logViewport  viewport.Model
+	mainViewport viewport.Model
 
 	spinner spinner.Model
 	help    help.Model
@@ -95,6 +96,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.Height-tabBarHeight-helpBarHeight-4,
 		)
 		m.logViewport.Style = BaseStyle
+		m.mainViewport = viewport.New(
+			msg.Width,
+			msg.Height-tabBarHeight-helpBarHeight-1,
+		)
+		m.mainViewport.Style = BaseStyle
 		m.ready = true
 
 	case tea.KeyMsg:
@@ -142,6 +148,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedIdx >= len(m.containers) {
 			m.selectedIdx = 0
 		}
+		m.mainViewport.GotoTop()
 		return m, m.refreshDelayed()
 
 	case imageMsg:
@@ -150,6 +157,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedIdx >= len(m.images) {
 			m.selectedIdx = 0
 		}
+		m.mainViewport.GotoTop()
 		return m, m.refreshDelayed()
 
 	case volumeMsg:
@@ -158,6 +166,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedIdx >= len(m.volumes) {
 			m.selectedIdx = 0
 		}
+		m.mainViewport.GotoTop()
 		return m, m.refreshDelayed()
 
 	case networkMsg:
@@ -166,6 +175,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedIdx >= len(m.networks) {
 			m.selectedIdx = 0
 		}
+		m.mainViewport.GotoTop()
 		return m, m.refreshDelayed()
 
 	case logMsg:
@@ -183,7 +193,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	return m, nil
+	var cmd tea.Cmd
+	m.mainViewport, cmd = m.mainViewport.Update(msg)
+	m.logViewport, _ = m.logViewport.Update(msg)
+	return m, cmd
 }
 
 func (m Model) View() string {
@@ -237,20 +250,26 @@ func (m Model) renderMain() string {
 	w := m.width
 	h := m.height - tabBarHeight - helpBarHeight
 
+	var content string
 	if m.err != nil {
-		return MainPanelStyle.Width(w).Height(h).Render(errorStyle.Render(m.err.Error()))
+		content = MainPanelStyle.Width(w).Height(h).Render(errorStyle.Render(m.err.Error()))
+	} else {
+		switch m.activeTab {
+		case tabImages:
+			content = m.renderImageList(w, h)
+		case tabVolumes:
+			content = m.renderVolumeList(w, h)
+		case tabNetworks:
+			content = m.renderNetworkList(w, h)
+		default:
+			content = m.renderContainerList(w, h)
+		}
 	}
-
-	switch m.activeTab {
-	case tabImages:
-		return m.renderImageList(w, h)
-	case tabVolumes:
-		return m.renderVolumeList(w, h)
-	case tabNetworks:
-		return m.renderNetworkList(w, h)
-	default:
-		return m.renderContainerList(w, h)
-	}
+	m.mainViewport.Width = w
+	m.mainViewport.Height = h
+	m.mainViewport.SetContent(content)
+	m.mainViewport.Style = BaseStyle
+	return m.mainViewport.View()
 }
 
 func (m Model) renderContainerList(w, h int) string {
