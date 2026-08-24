@@ -348,6 +348,23 @@ func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
 		}
 	case y >= tabBarHeight+1:
 		m.activePanel = panelMain
+		rowY := y - tabBarHeight - 2
+		if rowY < 0 {
+			rowY = 0
+		}
+		rowY += m.mainYOff
+		maxIdx := len(m.containers) - 1
+		switch m.activeTab {
+		case tabImages:
+			maxIdx = len(m.images) - 1
+		case tabVolumes:
+			maxIdx = len(m.volumes) - 1
+		case tabNetworks:
+			maxIdx = len(m.networks) - 1
+		}
+		if rowY >= 0 && rowY <= maxIdx {
+			m.selectedIdx = rowY
+		}
 	}
 	return m, nil
 }
