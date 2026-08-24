@@ -197,6 +197,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, cmd
+
+	case tea.MouseMsg:
+		if msg.Type == tea.MouseLeft {
+			return m.handleClick(msg.X, msg.Y)
+		}
+		var cmd tea.Cmd
+		m.mainViewport, cmd = m.mainViewport.Update(msg)
+		m.logViewport, _ = m.logViewport.Update(msg)
+		return m, cmd
 	}
 
 	if _, isKey := msg.(tea.KeyMsg); !isKey {
@@ -317,6 +326,30 @@ func (m Model) renderScrollbar() string {
 		}
 	}
 	return sb.String()
+}
+
+func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
+	switch {
+	case y == 1:
+		items := []string{"[1] Containers", "[2] Images", "[3] Volumes", "[4] Networks"}
+		var tabBorders []int
+		cum := 0
+		for _, item := range items {
+			w := lipgloss.Width(TabInactiveStyle.Render(" " + item + " "))
+			cum += w
+			tabBorders = append(tabBorders, cum)
+		}
+		for i, border := range tabBorders {
+			if x < border {
+				m.activeTab = tab(i)
+				m.mainYOff = 0
+				return m, m.refreshNow()
+			}
+		}
+	case y >= tabBarHeight+1:
+		m.activePanel = panelMain
+	}
+	return m, nil
 }
 
 func (m Model) renderContainerList(w, vw, h int) (string, string) {
