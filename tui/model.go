@@ -38,6 +38,14 @@ type volumeMsg []docker.Volume
 type networkMsg []docker.Network
 type errMsg struct{ err error }
 type logMsg string
+type containerLogMsg string
+
+type subTab int
+
+const (
+	subTabInfo subTab = iota
+	subTabLogs
+)
 
 type Model struct {
 	docker   *docker.Client
@@ -65,6 +73,10 @@ type Model struct {
 	ready   bool
 	width   int
 	height  int
+
+	activeSubTab          subTab
+	containerLogContent   string
+	containerLogViewport  viewport.Model
 }
 
 func New(dcli *docker.Client) Model {
@@ -103,6 +115,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.Height-tabBarHeight-helpBarHeight-1,
 		)
 		m.mainViewport.Style = BaseStyle
+		m.containerLogViewport = viewport.New(
+			msg.Width,
+			msg.Height-tabBarHeight-helpBarHeight-subTabBarHeight-4,
+		)
+		m.containerLogViewport.Style = BaseStyle
 		m.ready = true
 
 	case tea.KeyMsg:
@@ -113,6 +130,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.helpOn = !m.helpOn
 		case key.Matches(msg, keys.Tab):
 			m.cyclePanel()
+		case msg.String() == "left":
+			if m.activeTab == tabContainers {
+				m.activeSubTab = subTabInfo
+			}
+		case msg.String() == "right":
+			if m.activeTab == tabContainers {
+				m.activeSubTab = subTabLogs
+				return m, m.loadContainerLogs()
+			}
 		case key.Matches(msg, keys.Up):
 			m.moveUp()
 		case key.Matches(msg, keys.Down):
@@ -129,6 +155,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Back):
 			if m.activePanel == panelLogs {
 				m.activePanel = panelMain
+			} else if m.activeTab == tabContainers && m.activeSubTab == subTabLogs {
+				m.activeSubTab = subTabInfo
 			}
 		case key.Matches(msg, keys.One):
 			m.activeTab = tabContainers
@@ -189,6 +217,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logViewport.SetContent(m.logContent)
 		m.logViewport.GotoBottom()
 
+	case containerLogMsg:
+		m.containerLogContent = string(msg)
+		m.containerLogViewport.SetContent(m.containerLogContent)
+		m.containerLogViewport.GotoBottom()
+
 	case errMsg:
 		m.err = msg.err
 		m.loading = false
@@ -205,6 +238,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.mainViewport, cmd = m.mainViewport.Update(msg)
 		m.logViewport, _ = m.logViewport.Update(msg)
+		m.containerLogViewport, _ = m.containerLogViewport.Update(msg)
 		return m, cmd
 	}
 
@@ -269,6 +303,10 @@ func (m Model) renderMain() string {
 	h := m.height - tabBarHeight - helpBarHeight
 	vw := w - 1
 
+	if m.activeTab == tabContainers {
+		return m.renderContainersSplit(w, vw, h)
+	}
+
 	var hdr, rows string
 	if m.err != nil {
 		rows = MainPanelStyle.Width(w).Height(h).Render(errorStyle.Render(m.err.Error()))
@@ -280,8 +318,6 @@ func (m Model) renderMain() string {
 			hdr, rows = m.renderVolumeList(w, vw, h)
 		case tabNetworks:
 			hdr, rows = m.renderNetworkList(w, vw, h)
-		default:
-			hdr, rows = m.renderContainerList(w, vw, h)
 		}
 	}
 	m.mainViewport.Width = vw
@@ -299,6 +335,115 @@ func (m Model) renderMain() string {
 	return lipgloss.JoinVertical(lipgloss.Top,
 		hdr,
 		lipgloss.JoinHorizontal(lipgloss.Top, viewportView, scrollbar),
+	)
+}
+
+func (m Model) renderContainersSplit(w, vw, h int) string {
+	topH := int(float64(h) * splitRatio)
+	bottomH := h - topH - subTabBarHeight
+
+	var hdr, rows string
+	if m.err != nil {
+		rows = MainPanelStyle.Width(w).Height(h).Render(errorStyle.Render(m.err.Error()))
+	} else {
+		hdr, rows = m.renderContainerList(w, vw, h)
+	}
+
+	m.mainViewport.Width = vw
+	m.mainViewport.Height = topH - 2
+	m.mainViewport.SetContent(rows)
+	m.mainViewport.SetYOffset(m.mainYOff)
+	m.mainViewport.Style = BaseStyle
+	m.mainRows = strings.Count(rows, "\n") + 1
+	topContent := lipgloss.JoinVertical(lipgloss.Top, hdr,
+		lipgloss.JoinHorizontal(lipgloss.Top, m.mainViewport.View(), m.renderScrollbar()),
+	)
+
+	subBar := m.renderSubTabBar(w)
+	var bottomContent string
+	if m.activeSubTab == subTabLogs {
+		bottomContent = m.renderSubLogView(w, bottomH)
+	} else {
+		bottomContent = m.renderContainerDetail(w, bottomH)
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Top, topContent, subBar, bottomContent)
+}
+
+func (m Model) renderSubTabBar(w int) string {
+	items := []string{"[Info]", "[Logs]"}
+	var tabs []string
+	for i, item := range items {
+		if i == int(m.activeSubTab) {
+			tabs = append(tabs, SubTabActiveStyle.Render(" "+item+" "))
+		} else {
+			tabs = append(tabs, SubTabInactiveStyle.Render(" "+item+" "))
+		}
+	}
+	bar := lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
+	return lipgloss.Place(w, 1, lipgloss.Left, lipgloss.Top, bar,
+		lipgloss.WithWhitespaceBackground(t.Background),
+	)
+}
+
+func (m Model) renderContainerDetail(w, bottomH int) string {
+	if len(m.containers) == 0 || m.selectedIdx >= len(m.containers) {
+		return lipgloss.Place(w, bottomH, lipgloss.Top, lipgloss.Left,
+			BaseStyle.Render("  No container selected"),
+			lipgloss.WithWhitespaceBackground(t.Background),
+		)
+	}
+	c := m.containers[m.selectedIdx]
+	name := strings.TrimPrefix(c.Names[0], "/")
+	shortID := c.ID
+	if len(shortID) > 12 {
+		shortID = shortID[:12]
+	}
+
+	rowStyle := lipgloss.NewStyle().Background(t.Background)
+	pad := func(s string) string {
+		p := w - len([]rune(s))
+		if p < 0 {
+			p = 0
+		}
+		return rowStyle.Foreground(t.Foreground).Render(s + strings.Repeat(" ", p))
+	}
+	lines := []string{
+		pad("  Name:   " + name),
+		pad("  ID:     " + shortID),
+		pad("  Image:  " + c.Image),
+		pad("  Status: " + c.Status),
+		pad("  State:  " + c.State),
+		pad("  Ports:  " + formatPorts(c.Ports)),
+	}
+	content := lipgloss.JoinVertical(lipgloss.Top, lines...)
+	return lipgloss.Place(w, bottomH, lipgloss.Top, lipgloss.Left, content,
+		lipgloss.WithWhitespaceBackground(t.Background),
+	)
+}
+
+func (m Model) renderSubLogView(w, bottomH int) string {
+	if len(m.containers) == 0 || m.selectedIdx >= len(m.containers) {
+		return lipgloss.Place(w, bottomH, lipgloss.Top, lipgloss.Left,
+			BaseStyle.Render("  No container selected"),
+			lipgloss.WithWhitespaceBackground(t.Background),
+		)
+	}
+	c := m.containers[m.selectedIdx]
+	name := strings.TrimPrefix(c.Names[0], "/")
+
+	header := BaseStyle.Copy().Foreground(t.Accent).Bold(true).Render(" Logs: ") +
+		BaseStyle.Copy().Bold(true).Render(name) +
+		BaseStyle.Copy().Foreground(t.Muted).Render("   Esc back ")
+
+	m.containerLogViewport.Width = w
+	m.containerLogViewport.Height = bottomH - 2
+	m.containerLogViewport.SetContent(m.containerLogContent)
+
+	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Muted).Render(strings.Repeat("─", w))
+	content := lipgloss.JoinVertical(lipgloss.Top, header, sep, m.containerLogViewport.View())
+	return lipgloss.Place(w, bottomH, lipgloss.Top, lipgloss.Left, content,
+		lipgloss.WithWhitespaceBackground(t.Background),
 	)
 }
 
@@ -329,8 +474,8 @@ func (m Model) renderScrollbar() string {
 }
 
 func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
-	switch {
-	case y == 1:
+	// Global tabs: y=0~2 (line + tabs + line)
+	if y >= 0 && y <= 2 {
 		items := []string{"[1] Containers", "[2] Images", "[3] Volumes", "[4] Networks"}
 		var tabBorders []int
 		cum := 0
@@ -346,13 +491,51 @@ func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
 				return m, m.refreshNow()
 			}
 		}
-	case y >= tabBarHeight+1:
-		m.activePanel = panelMain
-		rowY := y - tabBarHeight - 2
-		if rowY < 0 {
-			rowY = 0
+		return m, nil
+	}
+
+	contentH := m.height - tabBarHeight - helpBarHeight
+	topH := int(float64(contentH) * splitRatio)
+
+	if m.activeTab == tabContainers {
+		absY := y - tabBarHeight
+
+		// Sub-tab bar click
+		if absY == topH {
+			m.activePanel = panelMain
+			subItems := []string{"[Info]", "[Logs]"}
+			cum := 0
+			for i, item := range subItems {
+				w := lipgloss.Width(SubTabInactiveStyle.Render(" " + item + " "))
+				cum += w
+				if x < cum {
+					m.activeSubTab = subTab(i)
+					if i == int(subTabLogs) {
+						return m, m.loadContainerLogs()
+					}
+					return m, nil
+				}
+			}
+			return m, nil
 		}
-		rowY += m.mainYOff
+
+		// Table rows
+		if absY < topH {
+			m.activePanel = panelMain
+			rowY := absY - 2 + m.mainYOff
+			if rowY >= 0 && rowY < len(m.containers) {
+				m.selectedIdx = rowY
+			}
+			return m, nil
+		}
+		return m, nil
+	}
+
+	// Other tabs
+	absY := y - tabBarHeight
+	if absY >= 0 {
+		m.activePanel = panelMain
+		rowY := absY - 2 + m.mainYOff
 		maxIdx := len(m.containers) - 1
 		switch m.activeTab {
 		case tabImages:
@@ -789,5 +972,24 @@ func (m Model) handleViewLogs() tea.Cmd {
 			return errMsg{err}
 		}
 		return logMsg(docker.StripDockerStreamHeaders(data))
+	}
+}
+
+func (m Model) loadContainerLogs() tea.Cmd {
+	if m.activeTab != tabContainers || m.selectedIdx >= len(m.containers) {
+		return nil
+	}
+	c := m.containers[m.selectedIdx]
+	return func() tea.Msg {
+		reader, err := m.docker.ContainerLogs(c.ID, "100", false)
+		if err != nil {
+			return errMsg{err}
+		}
+		defer reader.Close()
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			return errMsg{err}
+		}
+		return containerLogMsg(docker.StripDockerStreamHeaders(data))
 	}
 }

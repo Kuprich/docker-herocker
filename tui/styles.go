@@ -32,6 +32,17 @@ var (
 		Background(t.Background).
 		Foreground(t.Muted).
 		Padding(0, 1)
+
+	SubTabActiveStyle = lipgloss.NewStyle().
+		Background(t.Surface).
+		Foreground(t.Accent).
+		Bold(true).
+		Padding(0, 1)
+
+	SubTabInactiveStyle = lipgloss.NewStyle().
+		Background(t.Background).
+		Foreground(t.Muted).
+		Padding(0, 1)
 )
 
 func Truncate(s string, max int) string {
