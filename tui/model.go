@@ -523,7 +523,7 @@ func (m Model) buildDetailContent(w int) string {
 	section := lipgloss.NewStyle().Foreground(t.Accent).Bold(true)
 	rowStyle := lipgloss.NewStyle().Background(t.Background)
 	writeSection := func(title string) {
-		s := title + ":"
+		s := " " + title + ":"
 		pad := w - len([]rune(s))
 		if pad < 0 {
 			pad = 0
