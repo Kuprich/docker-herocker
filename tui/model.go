@@ -434,9 +434,13 @@ func (m Model) renderSubLogView(w, bottomH int) string {
 	c := m.containers[m.selectedIdx]
 	name := strings.TrimPrefix(c.Names[0], "/")
 
-	header := BaseStyle.Copy().Foreground(t.Accent).Bold(true).Render(" Logs: ") +
-		BaseStyle.Copy().Bold(true).Render(name) +
-		BaseStyle.Copy().Foreground(t.Muted).Render("   Esc back ")
+	rowStyle := lipgloss.NewStyle().Background(t.Background)
+	header := lipgloss.JoinHorizontal(lipgloss.Top,
+		rowStyle.Copy().Foreground(t.Accent).Bold(true).Render(" Logs: "),
+		rowStyle.Copy().Foreground(t.Foreground).Bold(true).Render(name),
+		rowStyle.Copy().Foreground(t.Muted).Render("   Esc back "),
+		rowStyle.Render(strings.Repeat(" ", w-len([]rune(" Logs: "+name+"   Esc back ")))),
+	)
 
 	m.containerLogViewport.Width = w
 	m.containerLogViewport.Height = bottomH - 2
