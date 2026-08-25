@@ -13,6 +13,7 @@ type Theme struct {
 	Muted      lipgloss.Color
 	Surface    lipgloss.Color
 	Border     lipgloss.Color
+	Info       lipgloss.Color
 }
 
 func DefaultTheme() Theme {
@@ -27,5 +28,6 @@ func DefaultTheme() Theme {
 		Muted:      lipgloss.Color("#8b949e"),
 		Surface:    lipgloss.Color("#161b22"),
 		Border:     lipgloss.Color("#30363d"),
+		Info:       lipgloss.Color("#58a6ff"),
 	}
 }

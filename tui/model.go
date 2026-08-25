@@ -508,13 +508,21 @@ func (m Model) buildDetailContent(w int) string {
 	line := func(label, value string) {
 		fmt.Fprintf(&b, "  %-10s %s\n", label+":", tv(value))
 	}
+	// coloredLine renders the value in color when it fits, like colorize().
+	coloredLine := func(label, plain string, color lipgloss.Color) {
+		fmt.Fprintf(&b, "  %-10s %s\n", label+":", colorize(plain, valW, color))
+	}
 
 	line("Name", strings.TrimPrefix(c.Names[0], "/"))
 	line("ID", shortID(c.ID))
 	line("Image", c.Image)
-	line("Status", c.Status)
-	line("State", c.State)
-	line("Ports", formatPorts(c.Ports))
+	coloredLine("Status", c.Status, stateColor(c.State))
+	coloredLine("State", c.State, stateColor(c.State))
+	if len([]rune(formatPorts(c.Ports))) <= valW {
+		fmt.Fprintf(&b, "  %-10s %s\n", "Ports:", formatPortsColored(c.Ports))
+	} else {
+		line("Ports", formatPorts(c.Ports))
+	}
 	if c.Created > 0 {
 		line("Created", time.Unix(c.Created, 0).Format("2006-01-02 15:04"))
 	}
@@ -880,18 +888,10 @@ func (m Model) renderContainerList(w, vw, h int) (string, string) {
 		img := Truncate(c.Image, 32)
 
 		dot := "●"
-		dotColor := t.Muted
-		switch c.State {
-		case "running":
-			dotColor = t.Success
-		case "paused":
-			dotColor = t.Warning
-		case "exited":
-			dotColor = t.Muted
+		if c.State == "exited" {
 			dot = "○"
-		default:
-			dotColor = t.Error
 		}
+		dotColor := stateColor(c.State)
 
 		line := fmt.Sprintf(" %s  %-29s %-11s  %-32s  %-34s", dot, name, state, img, ports)
 		runes := []rune(line)
@@ -901,19 +901,56 @@ func (m Model) renderContainerList(w, vw, h int) (string, string) {
 			runes = []rune(line)
 		} else if padding < 0 {
 			runes = runes[:max(colW, 3)]
-			line = string(runes)
 		}
-		dotRune := string(runes[1:2])
-		rest := string(runes[2:])
+
+		// Column boundaries of the container list row layout:
+		// " %s  %-29s %-11s  %-32s  %-34s"
+		const (
+			stateCol = 34 // 1 space + dot + 2 spaces + name(29) + gap
+			imageCol = 47 // state(11) + 2 gaps
+			portsCol = 81 // image(32) + 2 gaps
+		)
+		seg := func(from, to int) string {
+			if from > len(runes) {
+				from = len(runes)
+			}
+			if to > len(runes) {
+				to = len(runes)
+			}
+			if from > to {
+				from = to
+			}
+			return string(runes[from:to])
+		}
 
 		bg := t.Background
 		if i == m.selectedIdx {
 			bg = lipgloss.Color("#2d4a2e")
 		}
 		bgStyle := lipgloss.NewStyle().Background(bg)
+
+		// Ports: use the protocol-colored variant when the plain text fits,
+		// otherwise fall back to the (already truncated) plain segment.
+		avail := colW - portsCol
+		if avail < 0 {
+			avail = 0
+		}
+		portsPlain := strings.TrimRight(seg(portsCol, len(runes)), " ")
+		portsTail := portsPlain
+		if len([]rune(formatPorts(c.Ports))) <= avail {
+			pad := avail - len([]rune(portsPlain))
+			if pad < 0 {
+				pad = 0
+			}
+			portsTail = formatPortsColored(c.Ports) + strings.Repeat(" ", pad)
+		}
+
 		row := bgStyle.Render(" ") +
-			bgStyle.Copy().Foreground(dotColor).Render(dotRune) +
-			bgStyle.Foreground(t.Foreground).Render(rest)
+			bgStyle.Copy().Foreground(dotColor).Render(seg(1, 2)) +
+			bgStyle.Foreground(t.Foreground).Render(seg(2, stateCol)) +
+			bgStyle.Copy().Foreground(stateColor(c.State)).Render(seg(stateCol, imageCol)) +
+			bgStyle.Foreground(t.Foreground).Render(seg(imageCol, portsCol)) +
+			bgStyle.Render(portsTail)
 		rows = append(rows, row)
 	}
 	return header + "\n" + sep, lipgloss.JoinVertical(lipgloss.Top, rows...)
