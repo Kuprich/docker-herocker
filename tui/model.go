@@ -17,13 +17,6 @@ import (
 	"github.com/kuri4/dockerherocker/docker"
 )
 
-type panel int
-
-const (
-	panelMain panel = iota
-	panelLogs
-)
-
 type tab int
 
 const (
@@ -38,7 +31,6 @@ type imageMsg []docker.Image
 type volumeMsg []docker.Volume
 type networkMsg []docker.Network
 type errMsg struct{ err error }
-type logMsg string
 type containerLogMsg string
 type detailErrMsg struct{ err error }
 type containerDetailsMsg struct {
@@ -61,14 +53,11 @@ type Model struct {
 	volumes     []docker.Volume
 	networks    []docker.Network
 	selectedIdx int
-	activePanel panel
 	activeTab   tab
 	showAll     bool
 	loading     bool
 	err         error
 
-	logContent   string
-	logViewport  viewport.Model
 	mainViewport viewport.Model
 	mainYOff     int
 	mainRows     int
@@ -98,7 +87,6 @@ func New(dcli *docker.Client) Model {
 		help:        help.New(),
 		showAll:     true,
 		selectedIdx: 0,
-		activePanel: panelMain,
 	}
 }
 
@@ -122,11 +110,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		cw := innerW(msg.Width)
-		m.logViewport = viewport.New(
-			cw-5,
-			msg.Height-tabBarHeight-helpBarHeight-4,
-		)
-		m.logViewport.Style = BaseStyle
 		m.mainViewport = viewport.New(
 			cw,
 			msg.Height-tabBarHeight-helpBarHeight-1,
@@ -151,8 +134,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case key.Matches(msg, keys.Help):
 			m.helpOn = !m.helpOn
-		case key.Matches(msg, keys.Tab):
-			m.cyclePanel()
 		case msg.String() == "left":
 			if m.activeTab == tabContainers {
 				m.activeSubTab = subTabInfo
@@ -178,12 +159,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.toggleContainer()
 		case key.Matches(msg, keys.Restart):
 			return m, m.restartContainer()
-		case key.Matches(msg, keys.ViewLogs):
-			return m, m.handleViewLogs()
 		case key.Matches(msg, keys.Back):
-			if m.activePanel == panelLogs {
-				m.activePanel = panelMain
-			} else if m.activeTab == tabContainers && m.activeSubTab == subTabLogs {
+			if m.activeTab == tabContainers && m.activeSubTab == subTabLogs {
 				m.activeSubTab = subTabInfo
 			}
 		case key.Matches(msg, keys.One):
@@ -248,11 +225,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.scrollToSelected()
 		return m, m.refreshDelayed()
 
-	case logMsg:
-		m.logContent = string(msg)
-		m.logViewport.SetContent(m.logContent)
-		m.logViewport.GotoBottom()
-
 	case containerLogMsg:
 		m.containerLogContent = string(msg)
 		m.containerLogViewport.SetContent(m.containerLogContent)
@@ -281,12 +253,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleClick(msg.X, msg.Y)
 		}
 
-		if m.activePanel == panelLogs {
-			var cmd tea.Cmd
-			m.logViewport, cmd = m.logViewport.Update(msg)
-			return m, cmd
-		}
-
 		if m.activeTab == tabContainers && m.mouseInBottomPane(msg.Y) {
 			var cmd tea.Cmd
 			switch m.activeSubTab {
@@ -312,7 +278,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.mainViewport, cmd = m.mainViewport.Update(msg)
 			m.mainYOff = m.mainViewport.YOffset
-			m.logViewport, _ = m.logViewport.Update(msg)
 			return m, cmd
 		}
 	}
@@ -320,7 +285,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if _, isKey := msg.(tea.KeyMsg); !isKey {
 		var cmd tea.Cmd
 		m.mainViewport, cmd = m.mainViewport.Update(msg)
-		m.logViewport, _ = m.logViewport.Update(msg)
 		return m, cmd
 	}
 	return m, nil
@@ -353,7 +317,7 @@ func (m Model) renderHelpBar() string {
 	if m.helpOn {
 		return HelpBarStyle.Width(cw).Render(m.help.View(keys))
 	}
-	h := " 1-4  tabs  •  ↑/↓  navigate  •  Enter  logs  •  Space  start/stop  •  r  restart  •  a  all  •  ?  help"
+	h := " 1-4  tabs  •  ↑/↓  navigate  •  ←/→  Info/Logs  •  Space  start/stop  •  r  restart  •  a  all  •  ?  help"
 	return HelpBarStyle.Width(cw).Render(h)
 }
 
@@ -377,9 +341,6 @@ func (m Model) renderTabBar() string {
 }
 
 func (m Model) renderMain() string {
-	if m.activePanel == panelLogs {
-		return m.renderLogView()
-	}
 	w := innerW(m.width)
 	h := m.height - tabBarHeight - helpBarHeight
 	vw := w - 1
@@ -840,7 +801,6 @@ func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
 
 		// Sub-tab bar area (3 rows: line + tabs + line)
 		if absY >= topH && absY < topH+3 {
-			m.activePanel = panelMain
 			if absY == topH+1 {
 				subItems := []string{"Info", "Logs"}
 				cum := 0
@@ -861,7 +821,6 @@ func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
 
 		// Table rows
 		if absY < topH {
-			m.activePanel = panelMain
 			rowY := absY - 2 + m.mainYOff
 			if rowY >= 0 && rowY < len(m.containers) {
 				m.selectedIdx = rowY
@@ -878,7 +837,6 @@ func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
 	// Other tabs
 	absY := y - tabBarHeight
 	if absY >= 0 {
-		m.activePanel = panelMain
 		rowY := absY - 2 + m.mainYOff
 		maxIdx := len(m.containers) - 1
 		switch m.activeTab {
@@ -1155,27 +1113,6 @@ func (m Model) renderNetworkList(w, vw, h int) (string, string) {
 	return header + "\n" + sep, lipgloss.JoinVertical(lipgloss.Top, rows...)
 }
 
-func (m Model) renderLogView() string {
-	w := innerW(m.width)
-	h := m.height - tabBarHeight - helpBarHeight
-
-	if len(m.containers) == 0 || m.selectedIdx >= len(m.containers) {
-		return MainPanelStyle.Width(w).Height(h).Render("")
-	}
-	c := m.containers[m.selectedIdx]
-	name := strings.TrimPrefix(c.Names[0], "/")
-
-	header := BaseStyle.Copy().Foreground(t.Accent).Bold(true).Render(" Logs: ") +
-		BaseStyle.Copy().Bold(true).Render(name) +
-		BaseStyle.Copy().Foreground(t.Muted).Render("   Esc back ")
-
-	content := lipgloss.JoinVertical(lipgloss.Top,
-		header,
-		m.logViewport.View(),
-	)
-	return MainPanelStyle.Width(w).Height(h).Render(content)
-}
-
 func formatPorts(ports []docker.Port) string {
 	if len(ports) == 0 {
 		return ""
@@ -1210,14 +1147,6 @@ func wrapText(text string, width int) string {
 }
 
 // ---- navigation ----
-
-func (m *Model) cyclePanel() {
-	if m.activePanel == panelMain {
-		m.activePanel = panelLogs
-	} else {
-		m.activePanel = panelMain
-	}
-}
 
 func (m *Model) moveUp() {
 	if m.selectedIdx > 0 {
@@ -1336,26 +1265,6 @@ func (m Model) restartContainer() tea.Cmd {
 		}
 		time.Sleep(500 * time.Millisecond)
 		return m.refreshNow()()
-	}
-}
-
-func (m Model) handleViewLogs() tea.Cmd {
-	if m.activeTab != tabContainers || m.selectedIdx >= len(m.containers) {
-		return nil
-	}
-	c := m.containers[m.selectedIdx]
-	m.activePanel = panelLogs
-	return func() tea.Msg {
-		reader, err := m.docker.ContainerLogs(c.ID, "100", false)
-		if err != nil {
-			return errMsg{err}
-		}
-		defer reader.Close()
-		data, err := io.ReadAll(reader)
-		if err != nil {
-			return errMsg{err}
-		}
-		return logMsg(docker.StripDockerStreamHeaders(data))
 	}
 }
 
