@@ -484,7 +484,10 @@ func (m Model) renderContainerDetail(w, bottomH int) string {
 	return lipgloss.Place(w, bottomH, lipgloss.Top, lipgloss.Left,
 		lipgloss.JoinVertical(lipgloss.Top,
 			header,
-			m.detailViewport.View(),
+			lipgloss.JoinHorizontal(lipgloss.Top,
+				m.detailViewport.View(),
+				renderSubScrollbar(m.detailViewport),
+			),
 		),
 		lipgloss.WithWhitespaceBackground(t.Background),
 	)
@@ -619,28 +622,33 @@ func (m Model) renderSubLogView(w, bottomH int) string {
 		rowStyle.Render(strings.Repeat(" ", w-len([]rune(" Logs: "+name+"   Esc back ")))),
 	)
 
-	m.containerLogViewport.Width = w
+	m.containerLogViewport.Width = w - 1 // viewport shares the pane with the scrollbar column
 	m.containerLogViewport.Height = bottomH - 2
-	m.containerLogViewport.SetContent(wrapText(m.containerLogContent, w))
+	m.containerLogViewport.SetContent(wrapText(m.containerLogContent, w-1))
 
 	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
-	content := lipgloss.JoinVertical(lipgloss.Top, header, sep, m.containerLogViewport.View())
+	content := lipgloss.JoinVertical(lipgloss.Top, header, sep,
+		lipgloss.JoinHorizontal(lipgloss.Top,
+			m.containerLogViewport.View(),
+			renderSubScrollbar(m.containerLogViewport),
+		),
+	)
 	return lipgloss.Place(w, bottomH, lipgloss.Top, lipgloss.Left, content,
 		lipgloss.WithWhitespaceBackground(t.Background),
 	)
 }
 
-func (m Model) renderScrollbar() string {
-	vh := m.mainViewport.Height
-	if vh <= 0 || m.mainRows <= vh {
-		return BaseStyle.Width(1).Height(vh).Render(" ")
+// renderVScroll renders a 1-column vertical scrollbar for a viewport of
+// the given height showing totalRows lines at scroll progress pct.
+func renderVScroll(vh, totalRows int, pct float64) string {
+	if vh <= 0 || totalRows <= vh {
+		return BaseStyle.Width(1).Height(max(vh, 0)).Render(" ")
 	}
 	thumbH := 3
 	if vh < thumbH {
 		thumbH = vh
 	}
 	maxThumb := vh - thumbH
-	pct := m.mainViewport.ScrollPercent()
 	thumbPos := int(pct * float64(maxThumb))
 	var sb strings.Builder
 	for i := 0; i < vh; i++ {
@@ -654,6 +662,16 @@ func (m Model) renderScrollbar() string {
 		}
 	}
 	return sb.String()
+}
+
+// renderScrollbar is the main list scrollbar.
+func (m Model) renderScrollbar() string {
+	return renderVScroll(m.mainViewport.Height, m.mainRows, m.mainViewport.ScrollPercent())
+}
+
+// renderSubScrollbar is the scrollbar for a bottom-pane (sub-menu) viewport.
+func renderSubScrollbar(v viewport.Model) string {
+	return renderVScroll(v.Height, v.TotalLineCount(), v.ScrollPercent())
 }
 
 // fitMainViewport syncs the real mainViewport's size and content with what
@@ -709,9 +727,10 @@ func (m *Model) fitDetailViewport() {
 	if vh < 1 {
 		vh = 1
 	}
-	m.detailViewport.Width = w
+	cw := w - 1 // viewport shares the pane with the scrollbar column
+	m.detailViewport.Width = cw
 	m.detailViewport.Height = vh
-	content := m.buildDetailContent(w)
+	content := m.buildDetailContent(cw)
 	if content == "" {
 		content = "  No container selected"
 	}
@@ -903,13 +922,6 @@ func (m Model) renderContainerList(w, vw, h int) (string, string) {
 			runes = runes[:max(colW, 3)]
 		}
 
-		// Column boundaries of the container list row layout:
-		// " %s  %-29s %-11s  %-32s  %-34s"
-		const (
-			stateCol = 34 // 1 space + dot + 2 spaces + name(29) + gap
-			imageCol = 47 // state(11) + 2 gaps
-			portsCol = 81 // image(32) + 2 gaps
-		)
 		seg := func(from, to int) string {
 			if from > len(runes) {
 				from = len(runes)
