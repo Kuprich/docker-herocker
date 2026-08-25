@@ -23,8 +23,8 @@ var (
 		Height(1)
 
 	TabActiveStyle = lipgloss.NewStyle().
-		Background(lipgloss.Color("#21262d")).
-		Foreground(t.Accent).
+		Background(lipgloss.Color("#2ea043")).
+		Foreground(t.Background).
 		Bold(true).
 		Padding(0, 1)
 
@@ -34,8 +34,8 @@ var (
 		Padding(0, 1)
 
 	SubTabActiveStyle = lipgloss.NewStyle().
-		Background(lipgloss.Color("#21262d")).
-		Foreground(t.Accent).
+		Background(lipgloss.Color("#2ea043")).
+		Foreground(t.Background).
 		Bold(true).
 		Padding(0, 1)
 
