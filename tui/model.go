@@ -140,9 +140,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.loadContainerLogs()
 			}
 		case key.Matches(msg, keys.Up):
+			oldIdx := m.selectedIdx
 			m.moveUp()
+			if oldIdx != m.selectedIdx && m.activeTab == tabContainers && m.activeSubTab == subTabLogs {
+				return m, m.loadContainerLogs()
+			}
 		case key.Matches(msg, keys.Down):
+			oldIdx := m.selectedIdx
 			m.moveDown()
+			if oldIdx != m.selectedIdx && m.activeTab == tabContainers && m.activeSubTab == subTabLogs {
+				return m, m.loadContainerLogs()
+			}
 		case key.Matches(msg, keys.ToggleAll):
 			m.showAll = !m.showAll
 			return m, m.refreshNow()
@@ -533,6 +541,9 @@ func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
 			rowY := absY - 2 + m.mainYOff
 			if rowY >= 0 && rowY < len(m.containers) {
 				m.selectedIdx = rowY
+				if m.activeSubTab == subTabLogs {
+					return m, m.loadContainerLogs()
+				}
 			}
 			return m, nil
 		}
