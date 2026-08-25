@@ -518,8 +518,8 @@ func (m Model) buildDetailContent(w int) string {
 	line("Image", c.Image)
 	coloredLine("Status", c.Status, stateColor(c.State))
 	coloredLine("State", c.State, stateColor(c.State))
-	if len([]rune(formatPorts(c.Ports))) <= valW {
-		fmt.Fprintf(&b, "  %-10s %s\n", "Ports:", formatPortsColored(c.Ports))
+	if cell, ok := renderPortsCell(c.Ports, valW, t.Background); ok {
+		fmt.Fprintf(&b, "  %-10s %s\n", "Ports:", cell)
 	} else {
 		line("Ports", formatPorts(c.Ports))
 	}
@@ -929,20 +929,18 @@ func (m Model) renderContainerList(w, vw, h int) (string, string) {
 		}
 		bgStyle := lipgloss.NewStyle().Background(bg)
 
-		// Ports: use the protocol-colored variant when the plain text fits,
-		// otherwise fall back to the (already truncated) plain segment.
+		// Ports: use the protocol-colored cell (which fills the remaining
+		// width with its own background); fall back to the plain segment
+		// when the list does not fit.
 		avail := colW - portsCol
 		if avail < 0 {
 			avail = 0
 		}
-		portsPlain := strings.TrimRight(seg(portsCol, len(runes)), " ")
-		portsTail := portsPlain
-		if len([]rune(formatPorts(c.Ports))) <= avail {
-			pad := avail - len([]rune(portsPlain))
-			if pad < 0 {
-				pad = 0
-			}
-			portsTail = formatPortsColored(c.Ports) + strings.Repeat(" ", pad)
+		var portsRow string
+		if cell, ok := renderPortsCell(c.Ports, avail, bg); ok {
+			portsRow = cell
+		} else {
+			portsRow = bgStyle.Render(seg(portsCol, len(runes)))
 		}
 
 		row := bgStyle.Render(" ") +
@@ -950,7 +948,7 @@ func (m Model) renderContainerList(w, vw, h int) (string, string) {
 			bgStyle.Foreground(t.Foreground).Render(seg(2, stateCol)) +
 			bgStyle.Copy().Foreground(stateColor(c.State)).Render(seg(stateCol, imageCol)) +
 			bgStyle.Foreground(t.Foreground).Render(seg(imageCol, portsCol)) +
-			bgStyle.Render(portsTail)
+			portsRow
 		rows = append(rows, row)
 	}
 	return header + "\n" + sep, lipgloss.JoinVertical(lipgloss.Top, rows...)

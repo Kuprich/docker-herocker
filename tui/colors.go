@@ -24,38 +24,53 @@ func stateColor(state string) lipgloss.Color {
 	}
 }
 
-// colorize wraps value in color when it fits maxW, otherwise returns a
-// plainly truncated version - truncating an ANSI-styled string would
-// corrupt the escape sequences.
+// colorize wraps value in color and pads the remainder to maxW with the
+// theme background - an ANSI reset inside the styled value would otherwise
+// leave the rest of the line with the default terminal background.
+// Values longer than maxW are returned plainly truncated.
 func colorize(value string, maxW int, color lipgloss.Color) string {
-	if len([]rune(value)) <= maxW {
-		return lipgloss.NewStyle().Foreground(color).Render(value)
+	if len([]rune(value)) > maxW {
+		return Truncate(value, maxW)
 	}
-	return Truncate(value, maxW)
+	pad := maxW - len([]rune(value))
+	return lipgloss.NewStyle().Foreground(color).Render(value) +
+		lipgloss.NewStyle().Background(t.Background).Render(strings.Repeat(" ", pad))
 }
 
-// formatPortsColored renders ports with the protocol suffix highlighted:
-// /tcp muted, /udp warning-yellow. The visible characters match
-// formatPorts exactly, so both are interchangeable for layout math.
-func formatPortsColored(ports []docker.Port) string {
-	if len(ports) == 0 {
-		return ""
+// renderPortsCell renders the ports list as a self-contained cell that
+// fills exactly width columns: every segment (including separators and
+// padding) carries the given background, so no part of the line falls back
+// to the default terminal background. ok=false when the plain form exceeds
+// width - the caller should fall back to a plain truncated rendering.
+func renderPortsCell(ports []docker.Port, width int, bg lipgloss.Color) (string, bool) {
+	plain := formatPorts(ports)
+	if len([]rune(plain)) > width {
+		return "", false
 	}
-	tcp := lipgloss.NewStyle().Foreground(t.Muted)
-	udp := lipgloss.NewStyle().Foreground(t.Warning)
-	parts := make([]string, 0, len(ports))
-	for _, p := range ports {
-		var base string
+	base := lipgloss.NewStyle().Background(bg).Foreground(t.Foreground)
+	fill := lipgloss.NewStyle().Background(bg)
+	suffix := func(proto string) lipgloss.Style {
+		if proto == "udp" {
+			return lipgloss.NewStyle().Background(bg).Foreground(t.Warning)
+		}
+		return lipgloss.NewStyle().Background(bg).Foreground(t.Muted)
+	}
+
+	var b strings.Builder
+	for i, p := range ports {
+		if i > 0 {
+			b.WriteString(base.Render(", "))
+		}
 		if p.PublicPort != 0 {
-			base = fmt.Sprintf("%d->%d", p.PublicPort, p.PrivatePort)
+			b.WriteString(base.Render(fmt.Sprintf("%d->%d", p.PublicPort, p.PrivatePort)))
 		} else {
-			base = fmt.Sprintf("%d", p.PrivatePort)
+			b.WriteString(base.Render(fmt.Sprintf("%d", p.PrivatePort)))
 		}
-		style := tcp
-		if p.Type == "udp" {
-			style = udp
-		}
-		parts = append(parts, base+style.Render("/"+p.Type))
+		b.WriteString(suffix(p.Type).Render("/" + p.Type))
 	}
-	return strings.Join(parts, ", ")
+	pad := width - len([]rune(plain))
+	if pad > 0 {
+		b.WriteString(fill.Render(strings.Repeat(" ", pad)))
+	}
+	return b.String(), true
 }
