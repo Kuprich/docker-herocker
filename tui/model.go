@@ -609,7 +609,7 @@ func (m Model) renderContainerList(w, vw, h int) (string, string) {
 
 		bg := t.Background
 		if i == m.selectedIdx {
-			bg = lipgloss.Color("#1c2d1f")
+			bg = lipgloss.Color("#2d4a2e")
 		}
 		bgStyle := lipgloss.NewStyle().Background(bg)
 		row := bgStyle.Render(" ") +
@@ -670,7 +670,7 @@ func (m Model) renderImageList(w, vw, h int) (string, string) {
 
 		bg := t.Background
 		if i == m.selectedIdx {
-			bg = lipgloss.Color("#1c2d1f")
+			bg = lipgloss.Color("#2d4a2e")
 		}
 		bgStyle := lipgloss.NewStyle().Background(bg)
 		row := bgStyle.Render(" ") +
@@ -736,7 +736,7 @@ func (m Model) renderVolumeList(w, vw, h int) (string, string) {
 
 		bg := t.Background
 		if i == m.selectedIdx {
-			bg = lipgloss.Color("#1c2d1f")
+			bg = lipgloss.Color("#2d4a2e")
 		}
 		bgStyle := lipgloss.NewStyle().Background(bg)
 		row := bgStyle.Render(" ") +
@@ -787,7 +787,7 @@ func (m Model) renderNetworkList(w, vw, h int) (string, string) {
 
 		bg := t.Background
 		if i == m.selectedIdx {
-			bg = lipgloss.Color("#1c2d1f")
+			bg = lipgloss.Color("#2d4a2e")
 		}
 		bgStyle := lipgloss.NewStyle().Background(bg)
 		row := bgStyle.Render(" ") +
