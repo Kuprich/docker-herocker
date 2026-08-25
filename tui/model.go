@@ -186,7 +186,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case refreshTickMsg:
-		return m, tea.Batch(m.refreshNow(), refreshTicker())
+		return m, tea.Batch(m.refreshNow(), m.autoRefreshLogs(), refreshTicker())
 
 	case containerMsg:
 		m.containers = msg
@@ -229,9 +229,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case containerLogMsg:
-		m.containerLogContent = string(msg)
+		// Store pre-wrapped text so the persistent viewport's line count
+		// matches what the pane displays - otherwise AtBottom/GotoBottom
+		// anchor to the wrong offsets and fresh lines pile up off-screen.
+		// Follow the tail only when the user is already at the bottom;
+		// otherwise preserve their reading position.
+		follow := m.containerLogViewport.AtBottom()
+		m.containerLogContent = wrapText(string(msg), innerW(m.width)-1)
 		m.containerLogViewport.SetContent(m.containerLogContent)
-		m.containerLogViewport.GotoBottom()
+		if follow {
+			m.containerLogViewport.GotoBottom()
+		}
 
 	case containerDetailsMsg:
 		m.details = msg.details
@@ -597,9 +605,9 @@ func (m Model) renderSubLogView(w, bottomH int) string {
 		rowStyle.Render(strings.Repeat(" ", w-len([]rune(" Logs: "+name+"   Esc back ")))),
 	)
 
-	m.containerLogViewport.Width = w - 1              // viewport shares the pane with the scrollbar column
-	m.containerLogViewport.Height = max(bottomH-3, 1) // header + separator + blank gap row
-	m.containerLogViewport.SetContent(wrapText(m.containerLogContent, w-1))
+	m.containerLogViewport.Width = w - 1                     // viewport shares the pane with the scrollbar column
+	m.containerLogViewport.Height = max(bottomH-3, 1)        // header + separator + blank gap row
+	m.containerLogViewport.SetContent(m.containerLogContent) // already wrapped at fetch time
 
 	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
 	content := lipgloss.JoinVertical(lipgloss.Top, header, sep,
@@ -688,6 +696,25 @@ func (m *Model) fitMainViewport() {
 func (m *Model) fitViewports() {
 	m.fitMainViewport()
 	m.fitDetailViewport()
+	m.fitContainerLogViewport()
+}
+
+// fitContainerLogViewport re-wraps the stored logs for the current width
+// and keeps the persistent log viewport's dimensions in sync with the
+// bottom pane layout - stale dimensions would anchor AtBottom/GotoBottom
+// to the wrong offsets and hide the freshest lines below the visible area.
+func (m *Model) fitContainerLogViewport() {
+	h := m.height - tabBarHeight - helpBarHeight
+	topH := int(float64(h) * splitRatio)
+	bottomH := h - topH - subTabBarHeight
+	vh := max(bottomH-3, 1) // header + separator + blank gap row, same as renderSubLogView
+
+	m.containerLogViewport.Width = innerW(m.width) - 1
+	m.containerLogViewport.Height = vh
+	if m.containerLogContent == "" {
+		return
+	}
+	m.containerLogViewport.SetContent(wrapText(m.containerLogContent, innerW(m.width)-1))
 }
 
 // fitDetailViewport syncs the detail (Info) viewport's size and content on
@@ -1273,13 +1300,16 @@ func (m Model) restartContainer() tea.Cmd {
 	}
 }
 
+// logTail is how many last lines the Logs pane fetches.
+const logTail = "1000"
+
 func (m Model) loadContainerLogs() tea.Cmd {
 	if m.activeTab != tabContainers || m.selectedIdx >= len(m.containers) {
 		return nil
 	}
 	c := m.containers[m.selectedIdx]
 	return func() tea.Msg {
-		reader, err := m.docker.ContainerLogs(c.ID, "100", false)
+		reader, err := m.docker.ContainerLogs(c.ID, logTail, false)
 		if err != nil {
 			return errMsg{err}
 		}
@@ -1290,4 +1320,13 @@ func (m Model) loadContainerLogs() tea.Cmd {
 		}
 		return containerLogMsg(docker.StripDockerStreamHeaders(data))
 	}
+}
+
+// autoRefreshLogs re-fetches logs on every refresh tick while the Logs
+// sub-tab is showing, keeping them current.
+func (m Model) autoRefreshLogs() tea.Cmd {
+	if m.activeTab != tabContainers || m.activeSubTab != subTabLogs || m.selectedIdx >= len(m.containers) {
+		return nil
+	}
+	return m.loadContainerLogs()
 }

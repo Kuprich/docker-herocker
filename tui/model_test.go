@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/kuri4/dockerherocker/docker"
@@ -338,5 +339,54 @@ func TestStaleForeignMsgDoesNotResetWhenInRange(tt *testing.T) {
 	next := testMouseUpdate(m, containerMsg(makeTestContainers(9)))
 	if next.selectedIdx != 1 {
 		tt.Errorf("stale containerMsg reset selection to %d, want 1", next.selectedIdx)
+	}
+}
+
+func TestContainerLogMsgFollowBehavior(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.containers = makeTestContainers(1)
+	m.containerLogViewport = viewport.New(80, 5)
+
+	// first load on an empty viewport: must jump to bottom
+	next := testMouseUpdate(m, containerLogMsg(strings.Repeat("line\n", 30)))
+	if got := next.containerLogViewport.YOffset; got != 25 { // wrapText trims trailing newline: 30 lines - 5 height
+		tt.Errorf("initial load YOffset = %d, want 26 (bottom)", got)
+	}
+
+	// user scrolled up to read history: refresh must keep their position
+	scrolled := next
+	scrolled.containerLogViewport.YOffset = 0
+	next2 := testMouseUpdate(scrolled, containerLogMsg(strings.Repeat("line\n", 35)))
+	if got := next2.containerLogViewport.YOffset; got != 0 {
+		tt.Errorf("YOffset after refresh while reading = %d, want 0 (position preserved)", got)
+	}
+
+	// back to bottom: refresh follows the tail again
+	back := next2
+	back.containerLogViewport.YOffset = 31 // 36 lines - 5 height = bottom
+	next3 := testMouseUpdate(back, containerLogMsg(strings.Repeat("line\n", 40)))
+	if got := next3.containerLogViewport.YOffset; got != 35 { // 40 lines - 5 height
+		tt.Errorf("follow YOffset = %d, want 36 (bottom)", got)
+	}
+}
+
+func TestAutoRefreshLogsGuards(tt *testing.T) {
+	m := New(nil)
+	m.containers = makeTestContainers(1)
+	m.activeTab = tabImages
+	if cmd := m.autoRefreshLogs(); cmd != nil {
+		tt.Error("expected nil cmd on non-containers tab")
+	}
+	m.activeTab = tabContainers
+	m.activeSubTab = subTabInfo
+	if cmd := m.autoRefreshLogs(); cmd != nil {
+		tt.Error("expected nil cmd when Info sub-tab active")
+	}
+	m.activeSubTab = subTabLogs
+	if cmd := m.autoRefreshLogs(); cmd == nil {
+		tt.Error("expected cmd when Logs sub-tab active")
 	}
 }
