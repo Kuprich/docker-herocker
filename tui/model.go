@@ -633,8 +633,8 @@ func (m Model) renderSubLogView(w, bottomH int) string {
 		rowStyle.Render(strings.Repeat(" ", w-len([]rune(" Logs: "+name+"   Esc back ")))),
 	)
 
-	m.containerLogViewport.Width = w - 1 // viewport shares the pane with the scrollbar column
-	m.containerLogViewport.Height = bottomH - 2
+	m.containerLogViewport.Width = w - 1              // viewport shares the pane with the scrollbar column
+	m.containerLogViewport.Height = max(bottomH-3, 1) // header + separator + blank gap row
 	m.containerLogViewport.SetContent(wrapText(m.containerLogContent, w-1))
 
 	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
@@ -734,7 +734,7 @@ func (m *Model) fitDetailViewport() {
 	topH := int(float64(h) * splitRatio)
 	bottomH := h - topH - subTabBarHeight
 
-	vh := bottomH - 1 // only the " Info:" header row sits above the viewport
+	vh := bottomH - 2 // " Info:" header + a constant blank gap row at the bottom
 	if vh < 1 {
 		vh = 1
 	}
