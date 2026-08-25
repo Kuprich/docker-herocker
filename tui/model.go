@@ -110,28 +110,35 @@ func (m Model) Init() tea.Cmd {
 	)
 }
 
+// innerW returns the content width available to all renderers inside the
+// global horizontal margins.
+func innerW(terminalW int) int {
+	return terminalW - 2*appMarginX
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		cw := innerW(msg.Width)
 		m.logViewport = viewport.New(
-			msg.Width-5,
+			cw-5,
 			msg.Height-tabBarHeight-helpBarHeight-4,
 		)
 		m.logViewport.Style = BaseStyle
 		m.mainViewport = viewport.New(
-			msg.Width,
+			cw,
 			msg.Height-tabBarHeight-helpBarHeight-1,
 		)
 		m.mainViewport.Style = BaseStyle
 		m.containerLogViewport = viewport.New(
-			msg.Width,
+			cw,
 			msg.Height-tabBarHeight-helpBarHeight-subTabBarHeight-4,
 		)
 		m.containerLogViewport.Style = BaseStyle
 		m.detailViewport = viewport.New(
-			msg.Width,
+			cw,
 			msg.Height-tabBarHeight-helpBarHeight-subTabBarHeight-4,
 		)
 		m.detailViewport.Style = BaseStyle
@@ -328,6 +335,10 @@ func (m Model) View() string {
 		m.renderMain(),
 		m.renderHelpBar(),
 	)
+	content = lipgloss.NewStyle().
+		Background(t.Background).
+		Padding(0, appMarginX).
+		Render(content)
 	return lipgloss.Place(m.width, m.height,
 		lipgloss.Top, lipgloss.Left,
 		content,
@@ -338,14 +349,16 @@ func (m Model) View() string {
 // ---- render helpers ----
 
 func (m Model) renderHelpBar() string {
+	cw := innerW(m.width)
 	if m.helpOn {
-		return HelpBarStyle.Width(m.width).Render(m.help.View(keys))
+		return HelpBarStyle.Width(cw).Render(m.help.View(keys))
 	}
 	h := " 1-4  tabs  •  ↑/↓  navigate  •  Enter  logs  •  Space  start/stop  •  r  restart  •  a  all  •  ?  help"
-	return HelpBarStyle.Width(m.width).Render(h)
+	return HelpBarStyle.Width(cw).Render(h)
 }
 
 func (m Model) renderTabBar() string {
+	cw := innerW(m.width)
 	items := []string{"[1] Containers", "[2] Images", "[3] Volumes", "[4] Networks"}
 	var tabs []string
 	for i, item := range items {
@@ -356,10 +369,10 @@ func (m Model) renderTabBar() string {
 		}
 	}
 	tabsContent := lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
-	tabsContent = lipgloss.Place(m.width, 1, lipgloss.Left, lipgloss.Top, tabsContent,
+	tabsContent = lipgloss.Place(cw, 1, lipgloss.Left, lipgloss.Top, tabsContent,
 		lipgloss.WithWhitespaceBackground(t.Background),
 	)
-	line := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", m.width))
+	line := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", cw))
 	return lipgloss.JoinVertical(lipgloss.Top, line, tabsContent, line)
 }
 
@@ -367,7 +380,7 @@ func (m Model) renderMain() string {
 	if m.activePanel == panelLogs {
 		return m.renderLogView()
 	}
-	w := m.width
+	w := innerW(m.width)
 	h := m.height - tabBarHeight - helpBarHeight
 	vw := w - 1
 
@@ -640,7 +653,7 @@ func (m Model) renderScrollbar() string {
 // so without this the persistent viewport keeps stale dimensions and
 // bubbles-native scrolling (mouse wheel) silently no-ops.
 func (m *Model) fitMainViewport() {
-	w := m.width
+	w := innerW(m.width)
 	vw := w - 1
 	h := m.height - tabBarHeight - helpBarHeight
 
@@ -679,7 +692,7 @@ func (m *Model) fitViewports() {
 // fitDetailViewport syncs the detail (Info) viewport's size and content on
 // the persistent model, mirroring the bottom pane of the containers split.
 func (m *Model) fitDetailViewport() {
-	w := m.width
+	w := innerW(m.width)
 	h := m.height - tabBarHeight - helpBarHeight
 	topH := int(float64(h) * splitRatio)
 	bottomH := h - topH - subTabBarHeight
@@ -752,6 +765,13 @@ func (m Model) mouseInBottomPane(y int) bool {
 }
 
 func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
+	// Ignore clicks in the global horizontal margins and translate the
+	// x coordinate into the content area.
+	if x < appMarginX || x >= m.width-appMarginX {
+		return m, nil
+	}
+	x -= appMarginX
+
 	// Global tabs: y=0~2 (line + tabs + line)
 	if y >= 0 && y <= 2 {
 		items := []string{"[1] Containers", "[2] Images", "[3] Volumes", "[4] Networks"}
@@ -1077,7 +1097,7 @@ func (m Model) renderNetworkList(w, vw, h int) (string, string) {
 }
 
 func (m Model) renderLogView() string {
-	w := m.width
+	w := innerW(m.width)
 	h := m.height - tabBarHeight - helpBarHeight
 
 	if len(m.containers) == 0 || m.selectedIdx >= len(m.containers) {
