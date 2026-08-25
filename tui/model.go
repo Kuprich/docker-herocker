@@ -244,9 +244,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleClick(msg.X, msg.Y)
 		}
 		var cmd tea.Cmd
-		m.mainViewport, cmd = m.mainViewport.Update(msg)
-		m.logViewport, _ = m.logViewport.Update(msg)
-		m.containerLogViewport, _ = m.containerLogViewport.Update(msg)
+		if m.activeTab == tabContainers && m.mouseInLogsArea(msg.Y) {
+			m.containerLogViewport, cmd = m.containerLogViewport.Update(msg)
+		} else {
+			m.mainViewport, cmd = m.mainViewport.Update(msg)
+			m.logViewport, _ = m.logViewport.Update(msg)
+		}
 		return m, cmd
 	}
 
@@ -485,6 +488,15 @@ func (m Model) renderScrollbar() string {
 		}
 	}
 	return sb.String()
+}
+
+// mouseInLogsArea reports whether the mouse cursor is over the bottom
+// (sub-tab content) area of the containers split view.
+func (m Model) mouseInLogsArea(y int) bool {
+	contentH := m.height - tabBarHeight - helpBarHeight
+	topH := int(float64(contentH) * splitRatio)
+	absY := y - tabBarHeight
+	return absY >= topH+subTabBarHeight
 }
 
 func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
