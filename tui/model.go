@@ -734,7 +734,7 @@ func (m *Model) fitDetailViewport() {
 	topH := int(float64(h) * splitRatio)
 	bottomH := h - topH - subTabBarHeight
 
-	vh := bottomH - 2 // " Info:" header + a constant blank gap row at the bottom
+	vh := bottomH - 1 // a constant blank gap row at the bottom of the pane
 	if vh < 1 {
 		vh = 1
 	}
