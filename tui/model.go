@@ -94,8 +94,16 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.refreshNow(),
 		m.loadContainerDetails(),
+		refreshTicker(),
 		m.spinner.Tick,
 	)
+}
+
+// refreshTickMsg drives the single global auto-refresh ticker.
+type refreshTickMsg struct{}
+
+func refreshTicker() tea.Cmd {
+	return tea.Tick(refreshInterval, func(time.Time) tea.Msg { return refreshTickMsg{} })
 }
 
 // innerW returns the content width available to all renderers inside the
@@ -164,26 +172,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.activeSubTab = subTabInfo
 			}
 		case key.Matches(msg, keys.One):
-			m.activeTab = tabContainers
-			m.mainYOff = 0
-			m.fitViewports()
+			m.switchTab(tabContainers)
 			return m, tea.Batch(m.refreshNow(), m.loadContainerDetails())
 		case key.Matches(msg, keys.Two):
-			m.activeTab = tabImages
-			m.mainYOff = 0
-			m.fitViewports()
+			m.switchTab(tabImages)
 			return m, m.refreshNow()
 		case key.Matches(msg, keys.Three):
-			m.activeTab = tabVolumes
-			m.mainYOff = 0
-			m.fitViewports()
+			m.switchTab(tabVolumes)
 			return m, m.refreshNow()
 		case key.Matches(msg, keys.Four):
-			m.activeTab = tabNetworks
-			m.mainYOff = 0
-			m.fitViewports()
+			m.switchTab(tabNetworks)
 			return m, m.refreshNow()
 		}
+
+	case refreshTickMsg:
+		return m, tea.Batch(m.refreshNow(), refreshTicker())
 
 	case containerMsg:
 		m.containers = msg
@@ -193,7 +196,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.fitViewports()
 		m.scrollToSelected()
-		return m, tea.Batch(m.refreshDelayed(), m.loadContainerDetails())
+		return m, m.loadContainerDetails()
 
 	case imageMsg:
 		m.images = msg
@@ -203,7 +206,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.fitViewports()
 		m.scrollToSelected()
-		return m, m.refreshDelayed()
+		return m, nil
 
 	case volumeMsg:
 		m.volumes = msg
@@ -213,7 +216,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.fitViewports()
 		m.scrollToSelected()
-		return m, m.refreshDelayed()
+		return m, nil
 
 	case networkMsg:
 		m.networks = msg
@@ -223,7 +226,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.fitViewports()
 		m.scrollToSelected()
-		return m, m.refreshDelayed()
+		return m, nil
 
 	case containerLogMsg:
 		m.containerLogContent = string(msg)
@@ -784,9 +787,7 @@ func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
 		}
 		for i, border := range tabBorders {
 			if x < border {
-				m.activeTab = tab(i)
-				m.mainYOff = 0
-				m.fitViewports()
+				m.switchTab(tab(i))
 				return m, m.refreshNow()
 			}
 		}
@@ -1148,6 +1149,16 @@ func wrapText(text string, width int) string {
 
 // ---- navigation ----
 
+// switchTab activates a tab and resets the selection to its top - the
+// selected index is shared between tabs, so keeping it would place the
+// highlight at an arbitrary row of the new list.
+func (m *Model) switchTab(t tab) {
+	m.activeTab = t
+	m.selectedIdx = 0
+	m.mainYOff = 0
+	m.fitViewports()
+}
+
 func (m *Model) moveUp() {
 	if m.selectedIdx > 0 {
 		m.selectedIdx--
@@ -1225,12 +1236,6 @@ func (m Model) refreshNow() tea.Cmd {
 			return containerMsg(containers)
 		}
 	}
-}
-
-func (m Model) refreshDelayed() tea.Cmd {
-	return tea.Tick(2*time.Second, func(time.Time) tea.Msg {
-		return m.refreshNow()()
-	})
 }
 
 func (m Model) toggleContainer() tea.Cmd {

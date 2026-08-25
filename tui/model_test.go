@@ -255,3 +255,88 @@ func TestBuildDetailContentColoredLinesFillWidth(tt *testing.T) {
 		}
 	}
 }
+
+func makeTestImages(n int) []docker.Image {
+	out := make([]docker.Image, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, docker.Image{
+			ID:       strings.Repeat(string(rune('a'+i)), 12),
+			RepoTags: []string{"img" + string(rune('0'+i)) + ":latest"},
+			Created:  1700000000,
+			Size:     1000,
+		})
+	}
+	return out
+}
+
+func TestSwitchTabResetsSelection(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.containers = makeTestContainers(3)
+	m.images = makeTestImages(14)
+	m.selectedIdx = 12 // предпоследняя запись Images
+	m.activeTab = tabImages
+	m.fitViewports()
+
+	keyThree := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")}
+	next := testMouseUpdate(m, keyThree)
+
+	if next.activeTab != tabVolumes {
+		tt.Fatalf("activeTab = %d, want volumes", next.activeTab)
+	}
+	if next.selectedIdx != 0 {
+		tt.Errorf("selectedIdx after switch = %d, want 0 (start of volumes list)", next.selectedIdx)
+	}
+}
+
+func TestWheelAfterTabSwitchStartsFromTop(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.images = makeTestImages(14)
+	m.switchTab(tabImages)
+
+	wheelDown := tea.MouseMsg{X: 20, Y: 8, Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress}
+	next := testMouseUpdate(m, wheelDown)
+	if next.selectedIdx != 1 {
+		tt.Errorf("first wheel after switch moved selection to %d, want 1", next.selectedIdx)
+	}
+}
+
+func TestImageMsgKeepsSelectionOnActiveImagesTab(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.activeTab = tabImages
+	m.images = makeTestImages(14)
+	m.selectedIdx = 7
+	m.fitViewports()
+
+	next := testMouseUpdate(m, imageMsg(makeTestImages(14)))
+	if next.selectedIdx != 7 {
+		tt.Errorf("refresh reset selection to %d, want 7", next.selectedIdx)
+	}
+}
+
+func TestStaleForeignMsgDoesNotResetWhenInRange(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.activeTab = tabNetworks
+	m.networks = []docker.Network{
+		{ID: "a", Name: "bridge"}, {ID: "b", Name: "host"},
+	}
+	m.selectedIdx = 1
+	m.fitViewports()
+
+	// stale containers delivery from a parallel chain
+	next := testMouseUpdate(m, containerMsg(makeTestContainers(9)))
+	if next.selectedIdx != 1 {
+		tt.Errorf("stale containerMsg reset selection to %d, want 1", next.selectedIdx)
+	}
+}
