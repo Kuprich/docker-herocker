@@ -1,290 +1,268 @@
 package docker
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"io"
-	"net"
-	"net/http"
-	"net/url"
-	"os"
 	"strings"
+
+	mclient "github.com/moby/moby/client"
 )
 
 type Container struct {
-	ID      string   `json:"Id"`
-	Names   []string `json:"Names"`
-	Image   string   `json:"Image"`
-	ImageID string   `json:"ImageID"`
-	Command string   `json:"Command"`
-	Created int64    `json:"Created"`
-	State   string   `json:"State"`
-	Status  string   `json:"Status"`
-	Ports   []Port   `json:"Ports"`
+	ID      string
+	Names   []string
+	Image   string
+	ImageID string
+	Command string
+	Created int64
+	State   string
+	Status  string
+	Ports   []Port
 }
 
 type Port struct {
-	IP          string `json:"IP"`
-	PrivatePort int    `json:"PrivatePort"`
-	PublicPort  int    `json:"PublicPort"`
-	Type        string `json:"Type"`
+	IP          string
+	PrivatePort int
+	PublicPort  int
+	Type        string
 }
 
 type Image struct {
-	ID       string   `json:"Id"`
-	RepoTags []string `json:"RepoTags"`
-	Created  int64    `json:"Created"`
-	Size     int64    `json:"Size"`
+	ID       string
+	RepoTags []string
+	Created  int64
+	Size     int64
 }
 
 type Volume struct {
-	Name       string `json:"Name"`
-	Driver     string `json:"Driver"`
-	Mountpoint string `json:"Mountpoint"`
-	CreatedAt  string `json:"CreatedAt"`
-	Scope      string `json:"Scope"`
+	Name       string
+	Driver     string
+	Mountpoint string
+	CreatedAt  string
+	Scope      string
 }
 
-type volumeListResponse struct {
-	Volumes []Volume `json:"Volumes"`
+type Network struct {
+	ID     string
+	Name   string
+	Driver string
+	Scope  string
+}
+
+type HealthInfo struct {
+	Status string
 }
 
 type ContainerDetails struct {
 	State struct {
-		Status   string `json:"Status"`
-		ExitCode int    `json:"ExitCode"`
-		Health   *struct {
-			Status string `json:"Status"`
-		} `json:"Health"`
-	} `json:"State"`
+		Status   string
+		ExitCode int
+		Health   *HealthInfo
+	}
 	Config struct {
-		Labels map[string]string `json:"Labels"`
-	} `json:"Config"`
+		Labels map[string]string
+	}
 	NetworkSettings struct {
-		Networks map[string]NetworkEndpoint `json:"Networks"`
-	} `json:"NetworkSettings"`
-	Mounts []MountPoint `json:"Mounts"`
+		Networks map[string]NetworkEndpoint
+	}
+	Mounts []MountPoint
 }
 
 type NetworkEndpoint struct {
-	IPAddress string `json:"IPAddress"`
+	IPAddress string
 }
 
 type MountPoint struct {
-	Type        string `json:"Type"`
-	Name        string `json:"Name"`
-	Source      string `json:"Source"`
-	Destination string `json:"Destination"`
-	RW          bool   `json:"RW"`
+	Type        string
+	Name        string
+	Source      string
+	Destination string
+	RW          bool
 }
 
-type Network struct {
-	ID     string `json:"Id"`
-	Name   string `json:"Name"`
-	Driver string `json:"Driver"`
-	Scope  string `json:"Scope"`
-}
-
-type versionInfo struct {
-	APIVersion string `json:"ApiVersion"`
-}
-
+// Client wraps the official Docker SDK client behind the same interface the
+// TUI has always used.
 type Client struct {
-	baseURL   string
-	apiPrefix string
-	http      http.Client
+	cli *mclient.Client
 }
 
 func NewClient() (*Client, error) {
-	host := os.Getenv("DOCKER_HOST")
-	if host == "" {
-		host = "unix:///var/run/docker.sock"
-	}
-
-	u, err := url.Parse(host)
+	c, err := mclient.NewClientWithOpts(
+		mclient.FromEnv,
+		mclient.WithAPIVersionNegotiation(),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("invalid DOCKER_HOST: %w", err)
+		return nil, fmt.Errorf("creating docker client: %w", err)
 	}
-
-	c := &Client{baseURL: host}
-
-	switch u.Scheme {
-	case "unix":
-		c.http = http.Client{
-			Transport: &http.Transport{
-				Dial: func(proto, addr string) (net.Conn, error) {
-					return net.Dial("unix", u.Path)
-				},
-			},
-		}
-		c.baseURL = "http://docker"
-	case "tcp":
-		c.http = http.Client{}
-		c.baseURL = fmt.Sprintf("http://%s", u.Host)
-	default:
-		return nil, fmt.Errorf("unsupported Docker host scheme: %s", u.Scheme)
-	}
-
-	// Detect API version
-	ver, err := c.detectAPIVersion()
-	if err != nil {
-		return nil, fmt.Errorf("detecting Docker API version: %w", err)
-	}
-	c.apiPrefix = fmt.Sprintf("/v%s", ver)
-
-	return c, nil
-}
-
-func (c *Client) detectAPIVersion() (string, error) {
-	resp, err := c.http.Get(c.baseURL + "/version")
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	var v versionInfo
-	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
-		return "", err
-	}
-	if v.APIVersion == "" {
-		return "1.45", nil
-	}
-	return v.APIVersion, nil
-}
-
-func (c *Client) do(method, path string, body io.Reader) (*http.Response, error) {
-	req, err := http.NewRequest(method, c.baseURL+c.apiPrefix+path, body)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("docker request failed: %w", err)
-	}
-	if resp.StatusCode >= 400 {
-		resp.Body.Close()
-		return nil, fmt.Errorf("Docker API error: %s", resp.Status)
-	}
-	return resp, nil
+	return &Client{cli: c}, nil
 }
 
 func (c *Client) ListContainers(all bool) ([]Container, error) {
-	allFlag := "0"
-	if all {
-		allFlag = "1"
-	}
-	resp, err := c.do("GET", fmt.Sprintf("/containers/json?all=%s", allFlag), nil)
+	res, err := c.cli.ContainerList(context.Background(), mclient.ContainerListOptions{All: all})
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	var containers []Container
-	if err := json.NewDecoder(resp.Body).Decode(&containers); err != nil {
-		return nil, fmt.Errorf("decoding containers: %w", err)
+	out := make([]Container, 0, len(res.Items))
+	for _, s := range res.Items {
+		ports := make([]Port, 0, len(s.Ports))
+		for _, p := range s.Ports {
+			pp := int(p.PublicPort)
+			if p.PublicPort == 0 {
+				pp = 0
+			}
+			ports = append(ports, Port{
+				IP:          p.IP.String(),
+				PrivatePort: int(p.PrivatePort),
+				PublicPort:  pp,
+				Type:        p.Type,
+			})
+		}
+		out = append(out, Container{
+			ID:      s.ID,
+			Names:   s.Names,
+			Image:   s.Image,
+			ImageID: s.ImageID,
+			Command: s.Command,
+			Created: s.Created,
+			State:   string(s.State),
+			Status:  s.Status,
+			Ports:   ports,
+		})
 	}
-	return containers, nil
+	return out, nil
 }
 
 func (c *Client) ListImages(all bool) ([]Image, error) {
-	allFlag := "0"
-	if all {
-		allFlag = "1"
-	}
-	resp, err := c.do("GET", fmt.Sprintf("/images/json?all=%s", allFlag), nil)
+	res, err := c.cli.ImageList(context.Background(), mclient.ImageListOptions{All: all})
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	var images []Image
-	if err := json.NewDecoder(resp.Body).Decode(&images); err != nil {
-		return nil, fmt.Errorf("decoding images: %w", err)
+	out := make([]Image, 0, len(res.Items))
+	for _, s := range res.Items {
+		out = append(out, Image{
+			ID:       s.ID,
+			RepoTags: s.RepoTags,
+			Created:  s.Created,
+			Size:     s.Size,
+		})
 	}
-	return images, nil
+	return out, nil
 }
 
 func (c *Client) ListVolumes() ([]Volume, error) {
-	resp, err := c.do("GET", "/volumes", nil)
+	res, err := c.cli.VolumeList(context.Background(), mclient.VolumeListOptions{})
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	var res volumeListResponse
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		return nil, fmt.Errorf("decoding volumes: %w", err)
+	out := make([]Volume, 0, len(res.Items))
+	for _, v := range res.Items {
+		out = append(out, Volume{
+			Name:       v.Name,
+			Driver:     v.Driver,
+			Mountpoint: v.Mountpoint,
+			CreatedAt:  v.CreatedAt,
+			Scope:      v.Scope,
+		})
 	}
-	return res.Volumes, nil
+	return out, nil
 }
 
 func (c *Client) ListNetworks() ([]Network, error) {
-	resp, err := c.do("GET", "/networks", nil)
+	res, err := c.cli.NetworkList(context.Background(), mclient.NetworkListOptions{})
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	var networks []Network
-	if err := json.NewDecoder(resp.Body).Decode(&networks); err != nil {
-		return nil, fmt.Errorf("decoding networks: %w", err)
+	out := make([]Network, 0, len(res.Items))
+	for _, n := range res.Items {
+		out = append(out, Network{
+			ID:     n.ID,
+			Name:   n.Name,
+			Driver: n.Driver,
+			Scope:  n.Scope,
+		})
 	}
-	return networks, nil
+	return out, nil
+}
+
+func stopTimeout(seconds int) *int {
+	t := seconds
+	return &t
 }
 
 func (c *Client) StartContainer(id string) error {
-	_, err := c.do("POST", fmt.Sprintf("/containers/%s/start", id), nil)
+	_, err := c.cli.ContainerStart(context.Background(), id, mclient.ContainerStartOptions{})
 	return err
 }
 
 func (c *Client) StopContainer(id string) error {
-	_, err := c.do("POST", fmt.Sprintf("/containers/%s/stop?t=10", id), nil)
+	_, err := c.cli.ContainerStop(context.Background(), id, mclient.ContainerStopOptions{Timeout: stopTimeout(10)})
 	return err
 }
 
 func (c *Client) RestartContainer(id string) error {
-	_, err := c.do("POST", fmt.Sprintf("/containers/%s/restart?t=10", id), nil)
+	_, err := c.cli.ContainerRestart(context.Background(), id, mclient.ContainerRestartOptions{Timeout: stopTimeout(10)})
 	return err
 }
 
-func (c *Client) InspectContainer(id string) (*ContainerDetails, error) {
-	resp, err := c.do("GET", fmt.Sprintf("/containers/%s/json", id), nil)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var d ContainerDetails
-	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
-		return nil, fmt.Errorf("decoding container details: %w", err)
-	}
-	return &d, nil
-}
-
 func (c *Client) ContainerLogs(id, tail string, follow bool) (io.ReadCloser, error) {
-	followFlag := "0"
-	if follow {
-		followFlag = "1"
-	}
-	resp, err := c.do("GET", fmt.Sprintf("/containers/%s/logs?stdout=1&stderr=1&timestamps=1&tail=%s&follow=%s", id, url.QueryEscape(tail), followFlag), nil)
+	res, err := c.cli.ContainerLogs(context.Background(), id, mclient.ContainerLogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Timestamps: true,
+		Tail:       tail,
+		Follow:     follow,
+	})
 	if err != nil {
 		return nil, err
 	}
-	return resp.Body, nil
+	return res, nil
 }
 
-func (c *Client) Ping() error {
-	resp, err := c.http.Get(c.baseURL + "/_ping")
+func (c *Client) InspectContainer(id string) (*ContainerDetails, error) {
+	res, err := c.cli.ContainerInspect(context.Background(), id, mclient.ContainerInspectOptions{})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	resp.Body.Close()
-	return nil
+	ctr := res.Container
+
+	d := &ContainerDetails{
+		Mounts: make([]MountPoint, 0, len(ctr.Mounts)),
+	}
+	if ctr.State != nil {
+		d.State.Status = string(ctr.State.Status)
+		d.State.ExitCode = ctr.State.ExitCode
+		if ctr.State.Health != nil {
+			d.State.Health = &HealthInfo{Status: string(ctr.State.Health.Status)}
+		}
+	}
+	if ctr.Config != nil {
+		d.Config.Labels = ctr.Config.Labels
+	}
+	if ctr.NetworkSettings != nil && len(ctr.NetworkSettings.Networks) > 0 {
+		d.NetworkSettings.Networks = make(map[string]NetworkEndpoint, len(ctr.NetworkSettings.Networks))
+		for name, ep := range ctr.NetworkSettings.Networks {
+			ip := ""
+			if ep != nil && ep.IPAddress.IsValid() {
+				ip = ep.IPAddress.String()
+			}
+			d.NetworkSettings.Networks[name] = NetworkEndpoint{IPAddress: ip}
+		}
+	}
+	for _, mt := range ctr.Mounts {
+		d.Mounts = append(d.Mounts, MountPoint{
+			Type:        string(mt.Type),
+			Name:        mt.Name,
+			Source:      mt.Source,
+			Destination: mt.Destination,
+			RW:          mt.RW,
+		})
+	}
+	return d, nil
 }
 
 func (c *Client) Close() error {
-	return nil
+	return c.cli.Close()
 }
 
 // StripDockerStreamHeaders removes the 8-byte Docker stream header from log frames.
