@@ -106,17 +106,22 @@ func (c *Client) ListContainers(all bool) ([]Container, error) {
 	out := make([]Container, 0, len(res.Items))
 	for _, s := range res.Items {
 		ports := make([]Port, 0, len(s.Ports))
+		seen := make(map[Port]bool, len(s.Ports))
 		for _, p := range s.Ports {
-			pp := int(p.PublicPort)
-			if p.PublicPort == 0 {
-				pp = 0
-			}
-			ports = append(ports, Port{
+			port := Port{
 				IP:          p.IP.String(),
 				PrivatePort: int(p.PrivatePort),
-				PublicPort:  pp,
+				PublicPort:  int(p.PublicPort),
 				Type:        p.Type,
-			})
+			}
+			// The API reports one entry per bound IP (IPv4 + IPv6); we do
+			// not display the address, so collapse those duplicates.
+			key := Port{PrivatePort: port.PrivatePort, PublicPort: port.PublicPort, Type: port.Type}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			ports = append(ports, port)
 		}
 		out = append(out, Container{
 			ID:      s.ID,
