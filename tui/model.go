@@ -48,7 +48,7 @@ const (
 )
 
 type Model struct {
-	docker   *docker.Client
+	docker *docker.Client
 
 	containers  []docker.Container
 	images      []docker.Image
@@ -74,9 +74,9 @@ type Model struct {
 	width   int
 	height  int
 
-	activeSubTab          subTab
-	containerLogContent   string
-	containerLogViewport  viewport.Model
+	activeSubTab         subTab
+	containerLogContent  string
+	containerLogViewport viewport.Model
 }
 
 func New(dcli *docker.Client) Model {
@@ -120,6 +120,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.Height-tabBarHeight-helpBarHeight-subTabBarHeight-4,
 		)
 		m.containerLogViewport.Style = BaseStyle
+		m.fitMainViewport()
 		m.ready = true
 
 	case tea.KeyMsg:
@@ -169,18 +170,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.One):
 			m.activeTab = tabContainers
 			m.mainYOff = 0
+			m.fitMainViewport()
 			return m, m.refreshNow()
 		case key.Matches(msg, keys.Two):
 			m.activeTab = tabImages
 			m.mainYOff = 0
+			m.fitMainViewport()
 			return m, m.refreshNow()
 		case key.Matches(msg, keys.Three):
 			m.activeTab = tabVolumes
 			m.mainYOff = 0
+			m.fitMainViewport()
 			return m, m.refreshNow()
 		case key.Matches(msg, keys.Four):
 			m.activeTab = tabNetworks
 			m.mainYOff = 0
+			m.fitMainViewport()
 			return m, m.refreshNow()
 		}
 
@@ -190,6 +195,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedIdx >= len(m.containers) {
 			m.selectedIdx = 0
 		}
+		m.fitMainViewport()
 		m.scrollToSelected()
 		return m, m.refreshDelayed()
 
@@ -199,6 +205,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedIdx >= len(m.images) {
 			m.selectedIdx = 0
 		}
+		m.fitMainViewport()
 		m.scrollToSelected()
 		return m, m.refreshDelayed()
 
@@ -208,6 +215,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedIdx >= len(m.volumes) {
 			m.selectedIdx = 0
 		}
+		m.fitMainViewport()
 		m.scrollToSelected()
 		return m, m.refreshDelayed()
 
@@ -217,6 +225,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedIdx >= len(m.networks) {
 			m.selectedIdx = 0
 		}
+		m.fitMainViewport()
 		m.scrollToSelected()
 		return m, m.refreshDelayed()
 
@@ -247,7 +256,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.activeTab == tabContainers && m.mouseInLogsArea(msg.Y) {
 			m.containerLogViewport, cmd = m.containerLogViewport.Update(msg)
 		} else {
+			m.fitMainViewport()
 			m.mainViewport, cmd = m.mainViewport.Update(msg)
+			m.mainYOff = m.mainViewport.YOffset
 			m.logViewport, _ = m.logViewport.Update(msg)
 		}
 		return m, cmd
@@ -490,6 +501,40 @@ func (m Model) renderScrollbar() string {
 	return sb.String()
 }
 
+// fitMainViewport syncs the real mainViewport's size and content with what
+// the render path will display. Render helpers run on value copies of Model,
+// so without this the persistent viewport keeps stale dimensions and
+// bubbles-native scrolling (mouse wheel) silently no-ops.
+func (m *Model) fitMainViewport() {
+	w := m.width
+	vw := w - 1
+	h := m.height - tabBarHeight - helpBarHeight
+
+	var rows string
+	if m.activeTab == tabContainers {
+		topH := int(float64(h) * splitRatio)
+		_, rows = m.renderContainerList(w, vw, h)
+		m.mainViewport.Width = vw
+		m.mainViewport.Height = topH - 2
+	} else {
+		switch m.activeTab {
+		case tabImages:
+			_, rows = m.renderImageList(w, vw, h)
+		case tabVolumes:
+			_, rows = m.renderVolumeList(w, vw, h)
+		case tabNetworks:
+			_, rows = m.renderNetworkList(w, vw, h)
+		}
+		m.mainViewport.Width = vw
+		m.mainViewport.Height = h - 2
+	}
+	if rows == "" {
+		rows = MainPanelStyle.Width(w).Height(h).Render("")
+	}
+	m.mainViewport.SetContent(rows)
+	m.mainViewport.SetYOffset(m.mainYOff)
+}
+
 // mouseInLogsArea reports whether the mouse cursor is over the bottom
 // (sub-tab content) area of the containers split view.
 func (m Model) mouseInLogsArea(y int) bool {
@@ -514,6 +559,7 @@ func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
 			if x < border {
 				m.activeTab = tab(i)
 				m.mainYOff = 0
+				m.fitMainViewport()
 				return m, m.refreshNow()
 			}
 		}
@@ -592,7 +638,9 @@ func (m Model) renderContainerList(w, vw, h int) (string, string) {
 		return "", MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No containers found"))
 	}
 	hdr := fmt.Sprintf("     %-29s %-29s  %-27s  %-30s", "NAME", "STATUS", "IMAGE", "PORTS")
-	hdr = hdr + strings.Repeat(" ", w-len([]rune(hdr)))
+	if pad := w - len([]rune(hdr)); pad > 0 {
+		hdr += strings.Repeat(" ", pad)
+	}
 	header := lipgloss.NewStyle().Background(t.Background).Foreground(t.Accent).Bold(true).Render(hdr)
 	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
 
