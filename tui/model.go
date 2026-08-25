@@ -734,7 +734,7 @@ func (m *Model) fitDetailViewport() {
 	topH := int(float64(h) * splitRatio)
 	bottomH := h - topH - subTabBarHeight
 
-	vh := bottomH - 3
+	vh := bottomH - 1 // only the " Info:" header row sits above the viewport
 	if vh < 1 {
 		vh = 1
 	}
@@ -794,12 +794,13 @@ func (m Model) loadContainerDetails() tea.Cmd {
 }
 
 // mouseInBottomPane reports whether the mouse cursor is over the bottom
-// (sub-tab content) area of the containers split view.
+// half of the containers split view, including the sub-tab bar strip -
+// wheel events there scroll the active sub-pane.
 func (m Model) mouseInBottomPane(y int) bool {
 	contentH := m.height - tabBarHeight - helpBarHeight
 	topH := int(float64(contentH) * splitRatio)
 	absY := y - tabBarHeight
-	return absY >= topH+subTabBarHeight
+	return absY >= topH
 }
 
 func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
