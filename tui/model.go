@@ -143,15 +143,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Up):
 			oldIdx := m.selectedIdx
 			m.moveUp()
-			if oldIdx != m.selectedIdx && m.activeTab == tabContainers && m.activeSubTab == subTabLogs {
-				return m, m.loadContainerLogs()
-			}
+			return m, m.maybeReloadContainerLogs(oldIdx)
 		case key.Matches(msg, keys.Down):
 			oldIdx := m.selectedIdx
 			m.moveDown()
-			if oldIdx != m.selectedIdx && m.activeTab == tabContainers && m.activeSubTab == subTabLogs {
-				return m, m.loadContainerLogs()
-			}
+			return m, m.maybeReloadContainerLogs(oldIdx)
 		case key.Matches(msg, keys.ToggleAll):
 			m.showAll = !m.showAll
 			return m, m.refreshNow()
@@ -252,16 +248,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Type == tea.MouseLeft {
 			return m.handleClick(msg.X, msg.Y)
 		}
-		var cmd tea.Cmd
-		if m.activeTab == tabContainers && m.mouseInLogsArea(msg.Y) {
+
+		if m.activePanel == panelLogs {
+			var cmd tea.Cmd
+			m.logViewport, cmd = m.logViewport.Update(msg)
+			return m, cmd
+		}
+
+		if m.activeTab == tabContainers && m.activeSubTab == subTabLogs && m.mouseInLogsArea(msg.Y) {
+			var cmd tea.Cmd
 			m.containerLogViewport, cmd = m.containerLogViewport.Update(msg)
-		} else {
+			return m, cmd
+		}
+
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			oldIdx := m.selectedIdx
+			m.moveUp()
+			return m, m.maybeReloadContainerLogs(oldIdx)
+		case tea.MouseButtonWheelDown:
+			oldIdx := m.selectedIdx
+			m.moveDown()
+			return m, m.maybeReloadContainerLogs(oldIdx)
+		default:
 			m.fitMainViewport()
+			var cmd tea.Cmd
 			m.mainViewport, cmd = m.mainViewport.Update(msg)
 			m.mainYOff = m.mainViewport.YOffset
 			m.logViewport, _ = m.logViewport.Update(msg)
+			return m, cmd
 		}
-		return m, cmd
 	}
 
 	if _, isKey := msg.(tea.KeyMsg); !isKey {
@@ -533,6 +549,15 @@ func (m *Model) fitMainViewport() {
 	}
 	m.mainViewport.SetContent(rows)
 	m.mainViewport.SetYOffset(m.mainYOff)
+}
+
+// maybeReloadContainerLogs reloads the logs of the newly selected container
+// when the selection changed while the Logs sub-tab is active.
+func (m Model) maybeReloadContainerLogs(oldIdx int) tea.Cmd {
+	if oldIdx != m.selectedIdx && m.activeTab == tabContainers && m.activeSubTab == subTabLogs {
+		return m.loadContainerLogs()
+	}
+	return nil
 }
 
 // mouseInLogsArea reports whether the mouse cursor is over the bottom
