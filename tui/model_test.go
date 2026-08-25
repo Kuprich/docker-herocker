@@ -1,0 +1,238 @@
+package tui
+
+import (
+	"strings"
+	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/kuri4/dockerherocker/docker"
+)
+
+// stripANSI removes SGR escape sequences so assertions can inspect visible
+// text and layout only.
+func stripANSI(s string) string {
+	var b strings.Builder
+	inEsc := false
+	for _, r := range s {
+		if inEsc {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEsc = false
+			}
+			continue
+		}
+		if r == '\x1b' {
+			inEsc = true
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func TestStateColor(tt *testing.T) {
+	cases := map[string]lipgloss.Color{
+		"running":    t.Success,
+		"paused":     t.Warning,
+		"restarting": t.Error,
+		"dead":       t.Error,
+		"exited":     t.Muted,
+		"created":    t.Info,
+		"removing":   t.Info,
+	}
+	for state, want := range cases {
+		if got := stateColor(state); got != want {
+			tt.Errorf("stateColor(%q) = %v, want %v", state, got, want)
+		}
+	}
+}
+
+func TestStateColorsAreDistinct(tt *testing.T) {
+	colors := []lipgloss.Color{
+		stateColor("running"), stateColor("paused"), stateColor("restarting"),
+		stateColor("exited"), stateColor("created"),
+	}
+	seen := map[lipgloss.Color]bool{}
+	for _, c := range colors {
+		if seen[c] {
+			tt.Errorf("duplicate color in state palette: %v", c)
+		}
+		seen[c] = true
+	}
+}
+
+func TestRenderPortsCellFillsWidthWithBackground(tt *testing.T) {
+	ports := []docker.Port{
+		{PrivatePort: 80, PublicPort: 8080, Type: "tcp"},
+		{PrivatePort: 53, PublicPort: 5353, Type: "udp"},
+	}
+	cell, ok := renderPortsCell(ports, 40, t.Background)
+	if !ok {
+		tt.Fatal("expected cell to fit")
+	}
+	plain := stripANSI(cell)
+	if len([]rune(plain)) != 40 {
+		tt.Errorf("cell width = %d, want 40 (padded with background)", len([]rune(plain)))
+	}
+	want := "8080->80/tcp, 5353->53/udp"
+	if !strings.HasPrefix(plain, want) {
+		tt.Errorf("cell = %q, want prefix %q", plain, want)
+	}
+	// protocol suffixes carry their own color styles
+	udpStyle := lipgloss.NewStyle().Background(t.Background).Foreground(t.Warning).Render("/udp")
+	tcpStyle := lipgloss.NewStyle().Background(t.Background).Foreground(t.Muted).Render("/tcp")
+	for _, frag := range []string{udpStyle, tcpStyle} {
+		if !strings.Contains(cell, frag) {
+			tt.Errorf("cell missing styled segment %q", stripANSI(frag))
+		}
+	}
+}
+
+func TestRenderPortsCellFallbackWhenTooLong(tt *testing.T) {
+	ports := make([]docker.Port, 0, 20)
+	for i := 0; i < 20; i++ {
+		ports = append(ports, docker.Port{
+			PrivatePort: 1000 + i, PublicPort: 20000 + i, Type: "tcp",
+		})
+	}
+	if _, ok := renderPortsCell(ports, 30, t.Background); ok {
+		tt.Error("expected ok=false when ports exceed width")
+	}
+}
+
+func TestColorizeTruncatesLongValuesPlainly(tt *testing.T) {
+	got := colorize(strings.Repeat("x", 50), 10, t.Success)
+	plain := stripANSI(got)
+	if len([]rune(plain)) > 10 {
+		tt.Errorf("colorize did not truncate: %d runes", len([]rune(plain)))
+	}
+}
+
+func TestWheelOverTableMovesSelectionLikeKeys(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.containers = makeTestContainers(9)
+	m.fitViewports()
+
+	wheelDown := tea.MouseMsg{X: 20, Y: 8, Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress}
+	keyJ := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}
+
+	wheelModel := testMouseUpdate(m, wheelDown)
+	keyModel := testMouseUpdate(m, keyJ)
+
+	if wheelModel.selectedIdx != keyModel.selectedIdx {
+		tt.Errorf("wheel selection = %d, key selection = %d", wheelModel.selectedIdx, keyModel.selectedIdx)
+	}
+	if wheelModel.selectedIdx != 1 {
+		tt.Errorf("selection = %d, want 1", wheelModel.selectedIdx)
+	}
+}
+
+func testMouseUpdate(m Model, msg tea.Msg) Model {
+	next, _ := m.Update(msg)
+	return next.(Model)
+}
+
+func TestClickInLeftMarginIsIgnored(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.containers = makeTestContainers(3)
+	m.selectedIdx = 1
+	m.fitViewports()
+
+	click := tea.MouseMsg{X: 0, Y: 10, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}
+	next := testMouseUpdate(m, click)
+	if next.selectedIdx != 1 {
+		tt.Errorf("margin click changed selection to %d", next.selectedIdx)
+	}
+
+	click = tea.MouseMsg{X: 5 - appMarginX, Y: 10, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}
+	next = testMouseUpdate(m, click)
+	if next.selectedIdx != 1 {
+		tt.Errorf("content x=4 resolved to wrong row %d", next.selectedIdx)
+	}
+}
+
+func TestViewRespectsHorizontalMargins(tt *testing.T) {
+	m := New(nil)
+	m.width = 100
+	m.height = 24
+	m.ready = true
+	m.containers = makeTestContainers(2)
+	m.fitViewports()
+
+	for _, line := range strings.Split(m.View(), "\n") {
+		plain := stripANSI(line)
+		trimmed := strings.TrimRight(plain, " ")
+		if trimmed == "" {
+			continue
+		}
+		if !strings.HasPrefix(plain, " ") {
+			tt.Errorf("line does not start with left margin: %q", plain[:min(20, len(plain))])
+		}
+		break // checking the first content line is enough for the left side
+	}
+}
+
+func TestContainerListRowColumnOffsets(tt *testing.T) {
+	m := New(nil)
+	m.width = 140
+	m.height = 30
+	m.ready = true
+	m.loading = false
+	m.containers = makeTestContainers(3)
+	m.fitMainViewport()
+
+	hdr, rows := m.renderContainerList(innerW(m.width), innerW(m.width)-1, m.height-tabBarHeight-helpBarHeight)
+	_ = hdr
+	plain := stripANSI(rows)
+	lines := strings.Split(plain, "\n")
+	for i, line := range lines {
+		state := m.containers[i].State
+		runes := []rune(line)
+		idx := -1
+		for j := range runes {
+			if j+1 <= len(runes) && strings.HasPrefix(string(runes[j:]), state) {
+				idx = j
+				break
+			}
+		}
+		if idx != stateCol {
+			tt.Errorf("row %d: state at col %d, want %d (%q)", i, idx, stateCol, string(runes[:min(50, len(runes))]))
+		}
+	}
+}
+
+func TestTruncateHandlesMultibyteSafely(tt *testing.T) {
+	s := "привет мир это длинная строка"
+	got := Truncate(s, 10)
+	if got == "" {
+		tt.Fatal("empty truncation result")
+	}
+}
+
+// makeTestContainers builds n synthetic running containers.
+func makeTestContainers(n int) []docker.Container {
+	out := make([]docker.Container, 0, n)
+	for i := 0; i < n; i++ {
+		states := []string{"running", "exited", "restarting"}
+		out = append(out, docker.Container{
+			ID:      strings.Repeat(string(rune('a'+i)), 12),
+			Names:   []string{"/test-container-" + string(rune('0'+i))},
+			Image:   "img:latest",
+			State:   states[i%len(states)],
+			Status:  "Up 5 minutes",
+			Created: 1700000000,
+			Command: "sleep infinity",
+			Ports: []docker.Port{
+				{PrivatePort: 8000 + i, PublicPort: 9000 + i, Type: "tcp"},
+				{PrivatePort: 8000 + i, PublicPort: 9000 + i, Type: "tcp"}, // IPv6 dup
+			},
+		})
+	}
+	return out
+}

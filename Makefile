@@ -1,7 +1,7 @@
 BINARY=dockerherocker
 BUILD_DIR=build
 
-.PHONY: build run clean dev deps
+.PHONY: build run clean dev deps test test-e2e lint vet
 
 build:
 	@mkdir -p $(BUILD_DIR)
@@ -25,3 +25,9 @@ lint:
 
 vet:
 	go vet ./...
+
+test: build
+	go test ./...
+
+test-e2e: build
+	python3 scripts/e2e.py
