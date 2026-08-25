@@ -511,9 +511,20 @@ func (m Model) buildDetailContent(w int) string {
 	line := func(label, value string) {
 		fmt.Fprintf(&b, "  %-10s %s\n", label+":", tv(value))
 	}
+	// fillToWidth appends theme-background spaces so a line containing
+	// embedded ANSI resets still reaches the full block width - lipgloss
+	// pads shorter lines with UNSTYLED spaces after the last reset, which
+	// would show as default terminal background.
+	fillToWidth := func(v string) string {
+		used := 13 + valW // indent + label + gap + value width
+		if rest := w - used; rest > 0 {
+			return v + lipgloss.NewStyle().Background(t.Background).Render(strings.Repeat(" ", rest))
+		}
+		return v
+	}
 	// coloredLine renders the value in color when it fits, like colorize().
 	coloredLine := func(label, plain string, color lipgloss.Color) {
-		fmt.Fprintf(&b, "  %-10s %s\n", label+":", colorize(plain, valW, color))
+		fmt.Fprintf(&b, "  %-10s %s\n", label+":", fillToWidth(colorize(plain, valW, color)))
 	}
 
 	line("Name", strings.TrimPrefix(c.Names[0], "/"))
@@ -522,7 +533,7 @@ func (m Model) buildDetailContent(w int) string {
 	coloredLine("Status", c.Status, stateColor(c.State))
 	coloredLine("State", c.State, stateColor(c.State))
 	if cell, ok := renderPortsCell(c.Ports, valW, t.Background); ok {
-		fmt.Fprintf(&b, "  %-10s %s\n", "Ports:", cell)
+		fmt.Fprintf(&b, "  %-10s %s\n", "Ports:", fillToWidth(cell))
 	} else {
 		line("Ports", formatPorts(c.Ports))
 	}

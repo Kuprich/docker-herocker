@@ -236,3 +236,22 @@ func makeTestContainers(n int) []docker.Container {
 	}
 	return out
 }
+
+func TestBuildDetailContentColoredLinesFillWidth(tt *testing.T) {
+	m := New(nil)
+	w := 80
+	m.containers = makeTestContainers(1)
+	out := m.buildDetailContent(w)
+	for _, line := range strings.Split(out, "\n") {
+		plain := stripANSI(line)
+		isColoredField := strings.HasPrefix(strings.TrimSpace(plain), "Status:") ||
+			strings.HasPrefix(strings.TrimSpace(plain), "State:") ||
+			strings.HasPrefix(strings.TrimSpace(plain), "Ports:")
+		if !isColoredField {
+			continue
+		}
+		if got := len([]rune(plain)); got != w {
+			tt.Errorf("colored line visible width = %d, want %d (%q)", got, w, plain)
+		}
+	}
+}
