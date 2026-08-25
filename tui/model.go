@@ -444,7 +444,7 @@ func (m Model) renderSubLogView(w, bottomH int) string {
 
 	m.containerLogViewport.Width = w
 	m.containerLogViewport.Height = bottomH - 2
-	m.containerLogViewport.SetContent(m.containerLogContent)
+	m.containerLogViewport.SetContent(wrapText(m.containerLogContent, w))
 
 	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
 	content := lipgloss.JoinVertical(lipgloss.Top, header, sep, m.containerLogViewport.View())
@@ -831,6 +831,24 @@ func formatPorts(ports []docker.Port) string {
 		}
 	}
 	return strings.Join(parts, ", ")
+}
+
+func wrapText(text string, width int) string {
+	if width <= 0 {
+		return text
+	}
+	var result strings.Builder
+	for _, line := range strings.Split(text, "\n") {
+		runes := []rune(line)
+		for len(runes) > width {
+			result.WriteString(string(runes[:width]))
+			result.WriteByte('\n')
+			runes = runes[width:]
+		}
+		result.WriteString(string(runes))
+		result.WriteByte('\n')
+	}
+	return strings.TrimRight(result.String(), "\n")
 }
 
 // ---- navigation ----
