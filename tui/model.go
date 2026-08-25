@@ -32,7 +32,10 @@ type volumeMsg []docker.Volume
 type networkMsg []docker.Network
 type errMsg struct{ err error }
 type containerLogMsg string
-type detailErrMsg struct{ err error }
+
+// silentErrMsg is a background-fetch failure (logs/details) that must not
+// pollute the global error state shown to the user.
+type silentErrMsg struct{ err error }
 type containerDetailsMsg struct {
 	id      string
 	details *docker.ContainerDetails
@@ -190,6 +193,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case containerMsg:
 		m.containers = msg
+		m.err = nil // successful refresh clears transient errors
 		m.loading = false
 		if m.selectedIdx >= len(m.containers) {
 			m.selectedIdx = 0
@@ -200,6 +204,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case imageMsg:
 		m.images = msg
+		m.err = nil // successful refresh clears transient errors
 		m.loading = false
 		if m.selectedIdx >= len(m.images) {
 			m.selectedIdx = 0
@@ -210,6 +215,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case volumeMsg:
 		m.volumes = msg
+		m.err = nil // successful refresh clears transient errors
 		m.loading = false
 		if m.selectedIdx >= len(m.volumes) {
 			m.selectedIdx = 0
@@ -220,6 +226,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case networkMsg:
 		m.networks = msg
+		m.err = nil // successful refresh clears transient errors
 		m.loading = false
 		if m.selectedIdx >= len(m.networks) {
 			m.selectedIdx = 0
@@ -247,8 +254,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.fitDetailViewport()
 
-	case detailErrMsg:
-		// keep previously loaded details; inspect failures are non-fatal
+	case silentErrMsg:
+		// background fetch failures (logs/details) are non-fatal; keep
+		// previously loaded content
 
 	case errMsg:
 		m.err = msg.err
@@ -778,7 +786,7 @@ func (m Model) loadContainerDetails() tea.Cmd {
 	return func() tea.Msg {
 		d, err := m.docker.InspectContainer(c.ID)
 		if err != nil {
-			return detailErrMsg{err}
+			return silentErrMsg{err}
 		}
 		return containerDetailsMsg{id: c.ID, details: d}
 	}
@@ -1311,7 +1319,7 @@ func (m Model) loadContainerLogs() tea.Cmd {
 	return func() tea.Msg {
 		reader, err := m.docker.ContainerLogs(c.ID, logTail, false)
 		if err != nil {
-			return errMsg{err}
+			return silentErrMsg{err}
 		}
 		defer reader.Close()
 		data, err := io.ReadAll(reader)

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -388,5 +389,21 @@ func TestAutoRefreshLogsGuards(tt *testing.T) {
 	m.activeSubTab = subTabLogs
 	if cmd := m.autoRefreshLogs(); cmd == nil {
 		tt.Error("expected cmd when Logs sub-tab active")
+	}
+}
+
+func TestSuccessfulRefreshClearsError(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.activeTab = tabImages
+	m.images = makeTestImages(5)
+	m.err = fmt.Errorf("No such container: deadbeef")
+	m.fitViewports()
+
+	next := testMouseUpdate(m, imageMsg(makeTestImages(5)))
+	if next.err != nil {
+		tt.Errorf("successful refresh did not clear m.err: %v", next.err)
 	}
 }
