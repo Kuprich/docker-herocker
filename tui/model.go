@@ -520,8 +520,13 @@ func (m Model) buildDetailContent(w int) string {
 		line("Health", d.State.Health.Status)
 	}
 
+	section := lipgloss.NewStyle().Foreground(t.Accent).Bold(true)
+	writeSection := func(title string) {
+		b.WriteString("\n" + section.Render(title+":") + "\n")
+	}
+
 	if len(d.NetworkSettings.Networks) > 0 {
-		b.WriteString("\nNetworks:\n")
+		writeSection("Networks")
 		names := make([]string, 0, len(d.NetworkSettings.Networks))
 		for n := range d.NetworkSettings.Networks {
 			names = append(names, n)
@@ -533,7 +538,7 @@ func (m Model) buildDetailContent(w int) string {
 	}
 
 	if len(d.Mounts) > 0 {
-		b.WriteString("\nMounts:\n")
+		writeSection("Mounts")
 		for _, mt := range d.Mounts {
 			src := mt.Source
 			if src == "" && mt.Name != "" {
@@ -548,7 +553,7 @@ func (m Model) buildDetailContent(w int) string {
 	}
 
 	if len(d.Config.Labels) > 0 {
-		b.WriteString("\nLabels:\n")
+		writeSection("Labels")
 		keys := make([]string, 0, len(d.Config.Labels))
 		for k := range d.Config.Labels {
 			keys = append(keys, k)
