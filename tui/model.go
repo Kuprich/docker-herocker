@@ -463,13 +463,10 @@ func (m Model) renderContainerDetail(w, bottomH int) string {
 			lipgloss.WithWhitespaceBackground(t.Background),
 		)
 	}
-	c := m.containers[m.selectedIdx]
-	name := strings.TrimPrefix(c.Names[0], "/")
 
 	rowStyle := lipgloss.NewStyle().Background(t.Background)
 	header := rowStyle.Foreground(t.Accent).Bold(true).Render(" Info: ") +
-		rowStyle.Bold(true).Render(name) +
-		rowStyle.Render(strings.Repeat(" ", max(w-len([]rune(" Info: "+name)), 0)))
+		rowStyle.Render(strings.Repeat(" ", max(w-len([]rune(" Info: ")), 0)))
 
 	return lipgloss.Place(w, bottomH, lipgloss.Top, lipgloss.Left,
 		lipgloss.JoinVertical(lipgloss.Top,
@@ -488,7 +485,7 @@ func (m Model) buildDetailContent(w int) string {
 	}
 	c := m.containers[m.selectedIdx]
 
-	valW := w - 14
+	valW := w - 15
 	if valW < 8 {
 		valW = 8
 	}
@@ -496,7 +493,7 @@ func (m Model) buildDetailContent(w int) string {
 
 	var b strings.Builder
 	line := func(label, value string) {
-		fmt.Fprintf(&b, "  %-9s %s\n", label+":", tv(value))
+		fmt.Fprintf(&b, "  %-10s %s\n", label+":", tv(value))
 	}
 
 	line("Name", strings.TrimPrefix(c.Names[0], "/"))
