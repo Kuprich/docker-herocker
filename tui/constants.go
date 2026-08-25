@@ -4,7 +4,7 @@ import "github.com/charmbracelet/lipgloss"
 
 const (
 	tabBarHeight    = 3
-	subTabBarHeight = 1
+	subTabBarHeight = 3
 	helpBarHeight   = 1
 	logRefreshRate  = 200
 	splitRatio      = 0.50

@@ -371,7 +371,7 @@ func (m Model) renderContainersSplit(w, vw, h int) string {
 }
 
 func (m Model) renderSubTabBar(w int) string {
-	items := []string{"[Info]", "[Logs]"}
+	items := []string{"Info", "Logs"}
 	var tabs []string
 	for i, item := range items {
 		if i == int(m.activeSubTab) {
@@ -381,9 +381,11 @@ func (m Model) renderSubTabBar(w int) string {
 		}
 	}
 	bar := lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
-	return lipgloss.Place(w, 1, lipgloss.Left, lipgloss.Top, bar,
+	bar = lipgloss.Place(w, 1, lipgloss.Left, lipgloss.Top, bar,
 		lipgloss.WithWhitespaceBackground(t.Background),
 	)
+	line := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
+	return lipgloss.JoinVertical(lipgloss.Top, line, bar, line)
 }
 
 func (m Model) renderContainerDetail(w, bottomH int) string {
@@ -440,7 +442,7 @@ func (m Model) renderSubLogView(w, bottomH int) string {
 	m.containerLogViewport.Height = bottomH - 2
 	m.containerLogViewport.SetContent(m.containerLogContent)
 
-	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Muted).Render(strings.Repeat("─", w))
+	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
 	content := lipgloss.JoinVertical(lipgloss.Top, header, sep, m.containerLogViewport.View())
 	return lipgloss.Place(w, bottomH, lipgloss.Top, lipgloss.Left, content,
 		lipgloss.WithWhitespaceBackground(t.Background),
@@ -500,20 +502,22 @@ func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
 	if m.activeTab == tabContainers {
 		absY := y - tabBarHeight
 
-		// Sub-tab bar click
-		if absY == topH {
+		// Sub-tab bar area (3 rows: line + tabs + line)
+		if absY >= topH && absY < topH+3 {
 			m.activePanel = panelMain
-			subItems := []string{"[Info]", "[Logs]"}
-			cum := 0
-			for i, item := range subItems {
-				w := lipgloss.Width(SubTabInactiveStyle.Render(" " + item + " "))
-				cum += w
-				if x < cum {
-					m.activeSubTab = subTab(i)
-					if i == int(subTabLogs) {
-						return m, m.loadContainerLogs()
+			if absY == topH+1 {
+				subItems := []string{"Info", "Logs"}
+				cum := 0
+				for i, item := range subItems {
+					w := lipgloss.Width(SubTabInactiveStyle.Render(" " + item + " "))
+					cum += w
+					if x < cum {
+						m.activeSubTab = subTab(i)
+						if i == int(subTabLogs) {
+							return m, m.loadContainerLogs()
+						}
+						return m, nil
 					}
-					return m, nil
 				}
 			}
 			return m, nil
@@ -563,7 +567,7 @@ func (m Model) renderContainerList(w, vw, h int) (string, string) {
 	hdr := fmt.Sprintf("     %-29s %-29s  %-27s  %-30s", "NAME", "STATUS", "IMAGE", "PORTS")
 	hdr = hdr + strings.Repeat(" ", w-len([]rune(hdr)))
 	header := lipgloss.NewStyle().Background(t.Background).Foreground(t.Accent).Bold(true).Render(hdr)
-	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Muted).Render(strings.Repeat("─", w))
+	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
 
 	var rows []string
 	for i, c := range m.containers {
@@ -627,7 +631,7 @@ func (m Model) renderImageList(w, vw, h int) (string, string) {
 		hdr += strings.Repeat(" ", padding)
 	}
 	header := lipgloss.NewStyle().Background(t.Background).Foreground(t.Accent).Bold(true).Render(hdr)
-	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Muted).Render(strings.Repeat("─", w))
+	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
 
 	var rows []string
 	for i := range m.images {
@@ -705,7 +709,7 @@ func (m Model) renderVolumeList(w, vw, h int) (string, string) {
 		hdr += strings.Repeat(" ", padding)
 	}
 	header := lipgloss.NewStyle().Background(t.Background).Foreground(t.Accent).Bold(true).Render(hdr)
-	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Muted).Render(strings.Repeat("─", w))
+	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
 
 	var rows []string
 	for i := range m.volumes {
@@ -753,7 +757,7 @@ func (m Model) renderNetworkList(w, vw, h int) (string, string) {
 		hdr += strings.Repeat(" ", padding)
 	}
 	header := lipgloss.NewStyle().Background(t.Background).Foreground(t.Accent).Bold(true).Render(hdr)
-	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Muted).Render(strings.Repeat("─", w))
+	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
 
 	var rows []string
 	for i := range m.networks {
