@@ -20,4 +20,4 @@ dockerherocker
 Thumbs.db
 
 # Temp
-/tmp/
+/tmp/__pycache__/

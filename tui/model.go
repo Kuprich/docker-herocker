@@ -835,21 +835,20 @@ func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
 	if m.activeTab == tabContainers {
 		absY := y - tabBarHeight
 
-		// Sub-tab bar area (3 rows: line + tabs + line)
+		// Sub-tab bar area (3 rows: line + tabs + line). The whole strip
+		// is clickable so aiming one row off still hits the buttons.
 		if absY >= topH && absY < topH+3 {
-			if absY == topH+1 {
-				subItems := []string{"Info", "Logs"}
-				cum := 0
-				for i, item := range subItems {
-					w := lipgloss.Width(SubTabInactiveStyle.Render(" " + item + " "))
-					cum += w
-					if x < cum {
-						m.activeSubTab = subTab(i)
-						if i == int(subTabLogs) {
-							return m, m.loadContainerLogs()
-						}
-						return m, m.loadContainerDetails()
+			subItems := []string{"Info", "Logs"}
+			cum := 0
+			for i, item := range subItems {
+				w := lipgloss.Width(SubTabInactiveStyle.Render(" " + item + " "))
+				cum += w
+				if x < cum {
+					m.activeSubTab = subTab(i)
+					if i == int(subTabLogs) {
+						return m, m.loadContainerLogs()
 					}
+					return m, m.loadContainerDetails()
 				}
 			}
 			return m, nil
