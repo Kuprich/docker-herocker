@@ -16,6 +16,8 @@ type Container struct {
 	Names   []string `json:"Names"`
 	Image   string   `json:"Image"`
 	ImageID string   `json:"ImageID"`
+	Command string   `json:"Command"`
+	Created int64    `json:"Created"`
 	State   string   `json:"State"`
 	Status  string   `json:"Status"`
 	Ports   []Port   `json:"Ports"`
@@ -29,10 +31,10 @@ type Port struct {
 }
 
 type Image struct {
-	ID        string   `json:"Id"`
-	RepoTags  []string `json:"RepoTags"`
-	Created   int64    `json:"Created"`
-	Size      int64    `json:"Size"`
+	ID       string   `json:"Id"`
+	RepoTags []string `json:"RepoTags"`
+	Created  int64    `json:"Created"`
+	Size     int64    `json:"Size"`
 }
 
 type Volume struct {
@@ -45,6 +47,35 @@ type Volume struct {
 
 type volumeListResponse struct {
 	Volumes []Volume `json:"Volumes"`
+}
+
+type ContainerDetails struct {
+	State struct {
+		Status   string `json:"Status"`
+		ExitCode int    `json:"ExitCode"`
+		Health   *struct {
+			Status string `json:"Status"`
+		} `json:"Health"`
+	} `json:"State"`
+	Config struct {
+		Labels map[string]string `json:"Labels"`
+	} `json:"Config"`
+	NetworkSettings struct {
+		Networks map[string]NetworkEndpoint `json:"Networks"`
+	} `json:"NetworkSettings"`
+	Mounts []MountPoint `json:"Mounts"`
+}
+
+type NetworkEndpoint struct {
+	IPAddress string `json:"IPAddress"`
+}
+
+type MountPoint struct {
+	Type        string `json:"Type"`
+	Name        string `json:"Name"`
+	Source      string `json:"Source"`
+	Destination string `json:"Destination"`
+	RW          bool   `json:"RW"`
 }
 
 type Network struct {
@@ -215,6 +246,20 @@ func (c *Client) StopContainer(id string) error {
 func (c *Client) RestartContainer(id string) error {
 	_, err := c.do("POST", fmt.Sprintf("/containers/%s/restart?t=10", id), nil)
 	return err
+}
+
+func (c *Client) InspectContainer(id string) (*ContainerDetails, error) {
+	resp, err := c.do("GET", fmt.Sprintf("/containers/%s/json", id), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var d ContainerDetails
+	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+		return nil, fmt.Errorf("decoding container details: %w", err)
+	}
+	return &d, nil
 }
 
 func (c *Client) ContainerLogs(id, tail string, follow bool) (io.ReadCloser, error) {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +40,11 @@ type networkMsg []docker.Network
 type errMsg struct{ err error }
 type logMsg string
 type containerLogMsg string
+type detailErrMsg struct{ err error }
+type containerDetailsMsg struct {
+	id      string
+	details *docker.ContainerDetails
+}
 
 type subTab int
 
@@ -77,6 +83,9 @@ type Model struct {
 	activeSubTab         subTab
 	containerLogContent  string
 	containerLogViewport viewport.Model
+	details              *docker.ContainerDetails
+	detailsID            string
+	detailViewport       viewport.Model
 }
 
 func New(dcli *docker.Client) Model {
@@ -96,6 +105,7 @@ func New(dcli *docker.Client) Model {
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.refreshNow(),
+		m.loadContainerDetails(),
 		m.spinner.Tick,
 	)
 }
@@ -120,7 +130,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.Height-tabBarHeight-helpBarHeight-subTabBarHeight-4,
 		)
 		m.containerLogViewport.Style = BaseStyle
-		m.fitMainViewport()
+		m.detailViewport = viewport.New(
+			msg.Width,
+			msg.Height-tabBarHeight-helpBarHeight-subTabBarHeight-4,
+		)
+		m.detailViewport.Style = BaseStyle
+		m.fitViewports()
 		m.ready = true
 
 	case tea.KeyMsg:
@@ -134,6 +149,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case msg.String() == "left":
 			if m.activeTab == tabContainers {
 				m.activeSubTab = subTabInfo
+				return m, m.loadContainerDetails()
 			}
 		case msg.String() == "right":
 			if m.activeTab == tabContainers {
@@ -143,11 +159,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Up):
 			oldIdx := m.selectedIdx
 			m.moveUp()
-			return m, m.maybeReloadContainerLogs(oldIdx)
+			return m, m.selectionChangedCmds(oldIdx)
 		case key.Matches(msg, keys.Down):
 			oldIdx := m.selectedIdx
 			m.moveDown()
-			return m, m.maybeReloadContainerLogs(oldIdx)
+			return m, m.selectionChangedCmds(oldIdx)
 		case key.Matches(msg, keys.ToggleAll):
 			m.showAll = !m.showAll
 			return m, m.refreshNow()
@@ -166,22 +182,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.One):
 			m.activeTab = tabContainers
 			m.mainYOff = 0
-			m.fitMainViewport()
-			return m, m.refreshNow()
+			m.fitViewports()
+			return m, tea.Batch(m.refreshNow(), m.loadContainerDetails())
 		case key.Matches(msg, keys.Two):
 			m.activeTab = tabImages
 			m.mainYOff = 0
-			m.fitMainViewport()
+			m.fitViewports()
 			return m, m.refreshNow()
 		case key.Matches(msg, keys.Three):
 			m.activeTab = tabVolumes
 			m.mainYOff = 0
-			m.fitMainViewport()
+			m.fitViewports()
 			return m, m.refreshNow()
 		case key.Matches(msg, keys.Four):
 			m.activeTab = tabNetworks
 			m.mainYOff = 0
-			m.fitMainViewport()
+			m.fitViewports()
 			return m, m.refreshNow()
 		}
 
@@ -191,9 +207,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedIdx >= len(m.containers) {
 			m.selectedIdx = 0
 		}
-		m.fitMainViewport()
+		m.fitViewports()
 		m.scrollToSelected()
-		return m, m.refreshDelayed()
+		return m, tea.Batch(m.refreshDelayed(), m.loadContainerDetails())
 
 	case imageMsg:
 		m.images = msg
@@ -201,7 +217,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedIdx >= len(m.images) {
 			m.selectedIdx = 0
 		}
-		m.fitMainViewport()
+		m.fitViewports()
 		m.scrollToSelected()
 		return m, m.refreshDelayed()
 
@@ -211,7 +227,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedIdx >= len(m.volumes) {
 			m.selectedIdx = 0
 		}
-		m.fitMainViewport()
+		m.fitViewports()
 		m.scrollToSelected()
 		return m, m.refreshDelayed()
 
@@ -221,7 +237,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedIdx >= len(m.networks) {
 			m.selectedIdx = 0
 		}
-		m.fitMainViewport()
+		m.fitViewports()
 		m.scrollToSelected()
 		return m, m.refreshDelayed()
 
@@ -234,6 +250,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.containerLogContent = string(msg)
 		m.containerLogViewport.SetContent(m.containerLogContent)
 		m.containerLogViewport.GotoBottom()
+
+	case containerDetailsMsg:
+		m.details = msg.details
+		m.detailsID = msg.id
+		m.loading = false
+		m.fitDetailViewport()
+
+	case detailErrMsg:
+		// keep previously loaded details; inspect failures are non-fatal
 
 	case errMsg:
 		m.err = msg.err
@@ -255,9 +280,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
-		if m.activeTab == tabContainers && m.activeSubTab == subTabLogs && m.mouseInLogsArea(msg.Y) {
+		if m.activeTab == tabContainers && m.mouseInBottomPane(msg.Y) {
 			var cmd tea.Cmd
-			m.containerLogViewport, cmd = m.containerLogViewport.Update(msg)
+			switch m.activeSubTab {
+			case subTabLogs:
+				m.containerLogViewport, cmd = m.containerLogViewport.Update(msg)
+			case subTabInfo:
+				m.detailViewport, cmd = m.detailViewport.Update(msg)
+			}
 			return m, cmd
 		}
 
@@ -265,13 +295,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.MouseButtonWheelUp:
 			oldIdx := m.selectedIdx
 			m.moveUp()
-			return m, m.maybeReloadContainerLogs(oldIdx)
+			return m, m.selectionChangedCmds(oldIdx)
 		case tea.MouseButtonWheelDown:
 			oldIdx := m.selectedIdx
 			m.moveDown()
-			return m, m.maybeReloadContainerLogs(oldIdx)
+			return m, m.selectionChangedCmds(oldIdx)
 		default:
-			m.fitMainViewport()
+			m.fitViewports()
 			var cmd tea.Cmd
 			m.mainViewport, cmd = m.mainViewport.Update(msg)
 			m.mainYOff = m.mainViewport.YOffset
@@ -435,31 +465,111 @@ func (m Model) renderContainerDetail(w, bottomH int) string {
 	}
 	c := m.containers[m.selectedIdx]
 	name := strings.TrimPrefix(c.Names[0], "/")
-	shortID := c.ID
-	if len(shortID) > 12 {
-		shortID = shortID[:12]
-	}
 
 	rowStyle := lipgloss.NewStyle().Background(t.Background)
-	pad := func(s string) string {
-		p := w - len([]rune(s))
-		if p < 0 {
-			p = 0
-		}
-		return rowStyle.Foreground(t.Foreground).Render(s + strings.Repeat(" ", p))
-	}
-	lines := []string{
-		pad("  Name:   " + name),
-		pad("  ID:     " + shortID),
-		pad("  Image:  " + c.Image),
-		pad("  Status: " + c.Status),
-		pad("  State:  " + c.State),
-		pad("  Ports:  " + formatPorts(c.Ports)),
-	}
-	content := lipgloss.JoinVertical(lipgloss.Top, lines...)
-	return lipgloss.Place(w, bottomH, lipgloss.Top, lipgloss.Left, content,
+	header := rowStyle.Foreground(t.Accent).Bold(true).Render(" Info: ") +
+		rowStyle.Bold(true).Render(name) +
+		rowStyle.Render(strings.Repeat(" ", max(w-len([]rune(" Info: "+name)), 0)))
+
+	return lipgloss.Place(w, bottomH, lipgloss.Top, lipgloss.Left,
+		lipgloss.JoinVertical(lipgloss.Top,
+			header,
+			m.detailViewport.View(),
+		),
 		lipgloss.WithWhitespaceBackground(t.Background),
 	)
+}
+
+// buildDetailContent renders the full Info pane body: fields from the
+// containers list plus Networks/Mounts/Labels sections from inspect data.
+func (m Model) buildDetailContent(w int) string {
+	if len(m.containers) == 0 || m.selectedIdx >= len(m.containers) {
+		return ""
+	}
+	c := m.containers[m.selectedIdx]
+
+	valW := w - 14
+	if valW < 8 {
+		valW = 8
+	}
+	tv := func(s string) string { return Truncate(s, valW) }
+
+	var b strings.Builder
+	line := func(label, value string) {
+		fmt.Fprintf(&b, "  %-9s %s\n", label+":", tv(value))
+	}
+
+	line("Name", strings.TrimPrefix(c.Names[0], "/"))
+	line("ID", shortID(c.ID))
+	line("Image", c.Image)
+	line("Status", c.Status)
+	line("State", c.State)
+	line("Ports", formatPorts(c.Ports))
+	if c.Created > 0 {
+		line("Created", time.Unix(c.Created, 0).Format("2006-01-02 15:04"))
+	}
+	if c.Command != "" {
+		line("Command", c.Command)
+	}
+
+	d := m.details
+	if d == nil || m.detailsID != c.ID {
+		b.WriteString("\n  Loading details…")
+		return b.String()
+	}
+
+	line("Exit code", strconv.Itoa(d.State.ExitCode))
+	if d.State.Health != nil && d.State.Health.Status != "" {
+		line("Health", d.State.Health.Status)
+	}
+
+	if len(d.NetworkSettings.Networks) > 0 {
+		b.WriteString("\nNetworks:\n")
+		names := make([]string, 0, len(d.NetworkSettings.Networks))
+		for n := range d.NetworkSettings.Networks {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			fmt.Fprintf(&b, "    %-13s %s\n", Truncate(n, 13), tv(d.NetworkSettings.Networks[n].IPAddress))
+		}
+	}
+
+	if len(d.Mounts) > 0 {
+		b.WriteString("\nMounts:\n")
+		for _, mt := range d.Mounts {
+			src := mt.Source
+			if src == "" && mt.Name != "" {
+				src = mt.Name + " (volume)"
+			}
+			mode := "rw"
+			if !mt.RW {
+				mode = "ro"
+			}
+			fmt.Fprintf(&b, "    %s -> %s (%s)\n", tv(mt.Destination), tv(src), mode)
+		}
+	}
+
+	if len(d.Config.Labels) > 0 {
+		b.WriteString("\nLabels:\n")
+		keys := make([]string, 0, len(d.Config.Labels))
+		for k := range d.Config.Labels {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Fprintf(&b, "    %s=%s\n", tv(k), tv(d.Config.Labels[k]))
+		}
+	}
+
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func shortID(id string) string {
+	if len(id) > 12 {
+		return id[:12]
+	}
+	return id
 }
 
 func (m Model) renderSubLogView(w, bottomH int) string {
@@ -551,6 +661,34 @@ func (m *Model) fitMainViewport() {
 	m.mainViewport.SetYOffset(m.mainYOff)
 }
 
+// fitViewports syncs every viewport whose persistent state matters for
+// bubbles-native scrolling.
+func (m *Model) fitViewports() {
+	m.fitMainViewport()
+	m.fitDetailViewport()
+}
+
+// fitDetailViewport syncs the detail (Info) viewport's size and content on
+// the persistent model, mirroring the bottom pane of the containers split.
+func (m *Model) fitDetailViewport() {
+	w := m.width
+	h := m.height - tabBarHeight - helpBarHeight
+	topH := int(float64(h) * splitRatio)
+	bottomH := h - topH - subTabBarHeight
+
+	vh := bottomH - 3
+	if vh < 1 {
+		vh = 1
+	}
+	m.detailViewport.Width = w
+	m.detailViewport.Height = vh
+	content := m.buildDetailContent(w)
+	if content == "" {
+		content = "  No container selected"
+	}
+	m.detailViewport.SetContent(content)
+}
+
 // maybeReloadContainerLogs reloads the logs of the newly selected container
 // when the selection changed while the Logs sub-tab is active.
 func (m Model) maybeReloadContainerLogs(oldIdx int) tea.Cmd {
@@ -560,9 +698,45 @@ func (m Model) maybeReloadContainerLogs(oldIdx int) tea.Cmd {
 	return nil
 }
 
-// mouseInLogsArea reports whether the mouse cursor is over the bottom
+// maybeLoadContainerDetails fetches inspect data for the newly selected
+// container when the selection changed while the Info sub-tab is active.
+func (m Model) maybeLoadContainerDetails(oldIdx int) tea.Cmd {
+	if oldIdx != m.selectedIdx && m.activeTab == tabContainers && m.activeSubTab == subTabInfo {
+		return m.loadContainerDetails()
+	}
+	return nil
+}
+
+// selectionChangedCmds returns commands to run after the selected row moves.
+func (m Model) selectionChangedCmds(oldIdx int) tea.Cmd {
+	return tea.Batch(
+		m.maybeReloadContainerLogs(oldIdx),
+		m.maybeLoadContainerDetails(oldIdx),
+	)
+}
+
+// loadContainerDetails asynchronously inspects the selected container.
+// Skips the request when details for this exact container are already loaded.
+func (m Model) loadContainerDetails() tea.Cmd {
+	if m.activeTab != tabContainers || m.selectedIdx >= len(m.containers) {
+		return nil
+	}
+	c := m.containers[m.selectedIdx]
+	if m.detailsID == c.ID {
+		return nil
+	}
+	return func() tea.Msg {
+		d, err := m.docker.InspectContainer(c.ID)
+		if err != nil {
+			return detailErrMsg{err}
+		}
+		return containerDetailsMsg{id: c.ID, details: d}
+	}
+}
+
+// mouseInBottomPane reports whether the mouse cursor is over the bottom
 // (sub-tab content) area of the containers split view.
-func (m Model) mouseInLogsArea(y int) bool {
+func (m Model) mouseInBottomPane(y int) bool {
 	contentH := m.height - tabBarHeight - helpBarHeight
 	topH := int(float64(contentH) * splitRatio)
 	absY := y - tabBarHeight
@@ -584,7 +758,7 @@ func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
 			if x < border {
 				m.activeTab = tab(i)
 				m.mainYOff = 0
-				m.fitMainViewport()
+				m.fitViewports()
 				return m, m.refreshNow()
 			}
 		}
@@ -611,7 +785,7 @@ func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
 						if i == int(subTabLogs) {
 							return m, m.loadContainerLogs()
 						}
-						return m, nil
+						return m, m.loadContainerDetails()
 					}
 				}
 			}
@@ -627,6 +801,7 @@ func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
 				if m.activeSubTab == subTabLogs {
 					return m, m.loadContainerLogs()
 				}
+				return m, m.loadContainerDetails()
 			}
 			return m, nil
 		}
@@ -662,7 +837,7 @@ func (m Model) renderContainerList(w, vw, h int) (string, string) {
 	if len(m.containers) == 0 {
 		return "", MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No containers found"))
 	}
-	hdr := fmt.Sprintf("     %-29s %-29s  %-27s  %-30s", "NAME", "STATUS", "IMAGE", "PORTS")
+	hdr := fmt.Sprintf("     %-29s %-11s  %-32s  %-34s", "NAME", "STATE", "IMAGE", "PORTS")
 	if pad := w - len([]rune(hdr)); pad > 0 {
 		hdr += strings.Repeat(" ", pad)
 	}
@@ -672,9 +847,9 @@ func (m Model) renderContainerList(w, vw, h int) (string, string) {
 	var rows []string
 	for i, c := range m.containers {
 		name := Truncate(strings.TrimPrefix(c.Names[0], "/"), 29)
-		status := Truncate(c.Status, 29)
+		state := Truncate(c.State, 11)
 		ports := formatPorts(c.Ports)
-		img := Truncate(c.Image, 27)
+		img := Truncate(c.Image, 32)
 
 		dot := "●"
 		dotColor := t.Muted
@@ -690,7 +865,7 @@ func (m Model) renderContainerList(w, vw, h int) (string, string) {
 			dotColor = t.Error
 		}
 
-		line := fmt.Sprintf(" %s  %-29s %-29s  %-27s  %-30s", dot, name, status, img, ports)
+		line := fmt.Sprintf(" %s  %-29s %-11s  %-32s  %-34s", dot, name, state, img, ports)
 		runes := []rune(line)
 		padding := colW - len(runes)
 		if padding > 0 {
