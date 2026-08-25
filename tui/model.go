@@ -521,8 +521,14 @@ func (m Model) buildDetailContent(w int) string {
 	}
 
 	section := lipgloss.NewStyle().Foreground(t.Accent).Bold(true)
+	rowStyle := lipgloss.NewStyle().Background(t.Background)
 	writeSection := func(title string) {
-		b.WriteString("\n" + section.Render(title+":") + "\n")
+		s := title + ":"
+		pad := w - len([]rune(s))
+		if pad < 0 {
+			pad = 0
+		}
+		b.WriteString("\n" + section.Render(s) + rowStyle.Render(strings.Repeat(" ", pad)) + "\n")
 	}
 
 	if len(d.NetworkSettings.Networks) > 0 {
