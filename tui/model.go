@@ -539,7 +539,7 @@ func (m Model) buildDetailContent(w int) string {
 		}
 		sort.Strings(names)
 		for _, n := range names {
-			fmt.Fprintf(&b, "    %-13s %s\n", Truncate(n, 13), tv(d.NetworkSettings.Networks[n].IPAddress))
+			fmt.Fprintf(&b, "  %-13s %s\n", Truncate(n, 13), tv(d.NetworkSettings.Networks[n].IPAddress))
 		}
 	}
 
@@ -554,7 +554,7 @@ func (m Model) buildDetailContent(w int) string {
 			if !mt.RW {
 				mode = "ro"
 			}
-			fmt.Fprintf(&b, "    %s -> %s (%s)\n", tv(mt.Destination), tv(src), mode)
+			fmt.Fprintf(&b, "  %s -> %s (%s)\n", tv(mt.Destination), tv(src), mode)
 		}
 	}
 
@@ -566,7 +566,7 @@ func (m Model) buildDetailContent(w int) string {
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			fmt.Fprintf(&b, "    %s=%s\n", tv(k), tv(d.Config.Labels[k]))
+			fmt.Fprintf(&b, "  %s=%s\n", tv(k), tv(d.Config.Labels[k]))
 		}
 	}
 
