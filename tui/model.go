@@ -477,17 +477,10 @@ func (m Model) renderContainerDetail(w, bottomH int) string {
 		)
 	}
 
-	rowStyle := lipgloss.NewStyle().Background(t.Background)
-	header := rowStyle.Foreground(t.Accent).Bold(true).Render(" Info: ") +
-		rowStyle.Render(strings.Repeat(" ", max(w-len([]rune(" Info: ")), 0)))
-
 	return lipgloss.Place(w, bottomH, lipgloss.Top, lipgloss.Left,
-		lipgloss.JoinVertical(lipgloss.Top,
-			header,
-			lipgloss.JoinHorizontal(lipgloss.Top,
-				m.detailViewport.View(),
-				renderSubScrollbar(m.detailViewport),
-			),
+		lipgloss.JoinHorizontal(lipgloss.Top,
+			m.detailViewport.View(),
+			renderSubScrollbar(m.detailViewport),
 		),
 		lipgloss.WithWhitespaceBackground(t.Background),
 	)
@@ -508,6 +501,13 @@ func (m Model) buildDetailContent(w int) string {
 	tv := func(s string) string { return Truncate(s, valW) }
 
 	var b strings.Builder
+	// The " Info:" title is part of the scrollable content so it scrolls
+	// away with the body.
+	titleStyle := lipgloss.NewStyle().Foreground(t.Accent).Bold(true)
+	b.WriteString(titleStyle.Render(" Info:") +
+		lipgloss.NewStyle().Background(t.Background).
+			Render(strings.Repeat(" ", max(w-len([]rune(" Info:")), 0))) + "\n")
+
 	line := func(label, value string) {
 		fmt.Fprintf(&b, "  %-10s %s\n", label+":", tv(value))
 	}
