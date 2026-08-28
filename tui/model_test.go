@@ -407,3 +407,24 @@ func TestSuccessfulRefreshClearsError(tt *testing.T) {
 		tt.Errorf("successful refresh did not clear m.err: %v", next.err)
 	}
 }
+
+func TestBuildDetailContentNetworksNameColumn(tt *testing.T) {
+	m := New(nil)
+	w := 80
+	m.containers = makeTestContainers(1)
+	m.detailsID = m.containers[0].ID
+	m.details = &docker.ContainerDetails{}
+	m.details.NetworkSettings.Networks = map[string]docker.NetworkEndpoint{
+		"t1_test_default":                 {IPAddress: "172.19.0.9"},
+		"dockerherocker_frontend_network": {IPAddress: "172.20.0.2"},
+	}
+	out := m.buildDetailContent(w)
+	for _, want := range []string{"t1_test_default", "dockerherocker_frontend_network", "172.19.0.9", "172.20.0.2"} {
+		if !strings.Contains(stripANSI(out), want) {
+			tt.Errorf("network line missing %q in output:\n%s", want, stripANSI(out))
+		}
+	}
+	if strings.Contains(stripANSI(out), "…") {
+		tt.Errorf("long network name got truncated at w=%d:\n%s", w, stripANSI(out))
+	}
+}

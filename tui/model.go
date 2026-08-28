@@ -553,8 +553,19 @@ func (m Model) buildDetailContent(w int) string {
 			names = append(names, n)
 		}
 		sort.Strings(names)
+		// Column width = longest name in this section (truncation floor 13),
+		// capped so the IP never gets pushed off the panel.
+		nameCol := 13
 		for _, n := range names {
-			fmt.Fprintf(&b, "  %-13s %s\n", Truncate(n, 13), tv(d.NetworkSettings.Networks[n].IPAddress))
+			if l := len([]rune(n)); l > nameCol {
+				nameCol = l
+			}
+		}
+		if lim := w - 40; nameCol > lim {
+			nameCol = lim
+		}
+		for _, n := range names {
+			fmt.Fprintf(&b, "  %-*s %s\n", nameCol, Truncate(n, nameCol), tv(d.NetworkSettings.Networks[n].IPAddress))
 		}
 	}
 
