@@ -708,12 +708,14 @@ func (m Model) renderSubLogView(w, bottomH int) string {
 	)
 }
 
-// followCheckboxGlyph renders the follow-the-tail checkbox marker.
+// followCheckboxGlyph renders the follow-the-tail status circle: a filled
+// ● when following the tail, a hollow ○ when not, mirroring the containers
+// table's state dots (color is applied by the header styles).
 func (m Model) followCheckboxGlyph() string {
 	if m.logFollow {
-		return "[x]"
+		return "●"
 	}
-	return "[ ]"
+	return "○"
 }
 
 // followCheckboxText is the combined glyph+label, used as the size oracle

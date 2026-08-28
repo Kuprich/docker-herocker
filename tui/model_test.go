@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/kuri4/dockerherocker/docker"
+	"github.com/muesli/termenv"
 )
 
 // stripANSI removes SGR escape sequences so assertions can inspect visible
@@ -537,17 +539,45 @@ func TestFollowCheckboxGlyph(tt *testing.T) {
 	on.logFollow = true
 	off := New(nil)
 	off.logFollow = false
-	if got := on.followCheckboxGlyph(); got != "[x]" {
-		tt.Errorf("on glyph = %q, want %q", got, "[x]")
+	if got := on.followCheckboxGlyph(); got != "●" {
+		tt.Errorf("on glyph = %q, want %q", got, "●")
 	}
-	if got := off.followCheckboxGlyph(); got != "[ ]" {
-		tt.Errorf("off glyph = %q, want %q", got, "[ ]")
+	if got := off.followCheckboxGlyph(); got != "○" {
+		tt.Errorf("off glyph = %q, want %q", got, "○")
 	}
-	if got := on.followCheckboxText(); got != "[x] follow" {
-		tt.Errorf("on text = %q, want %q", got, "[x] follow")
+	if got := on.followCheckboxText(); got != "● follow" {
+		tt.Errorf("on text = %q, want %q", got, "● follow")
 	}
-	if got := off.followCheckboxText(); got != "[ ] follow" {
-		tt.Errorf("off text = %q, want %q", got, "[ ] follow")
+	if got := off.followCheckboxText(); got != "○ follow" {
+		tt.Errorf("off text = %q, want %q", got, "○ follow")
+	}
+}
+
+func TestFollowDotColors(tt *testing.T) {
+	// lipgloss downgrades to the Ascii profile when stdout is not a TTY;
+	// force TrueColor so the emitted SGR sequences assert the real palette.
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	tt.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+
+	on := New(nil)
+	on.width = 120
+	on.activeSubTab = subTabLogs
+	on.containers = makeTestContainers(1)
+	on.logFollow = true
+	raw := on.renderSubLogView(100, 10)
+	if !regexp.MustCompile(`\x1b\[[0-9;]*38;2;63;185;80[0-9;]*m●`).MatchString(raw) {
+		tt.Errorf("follow ON circle not accent-green (63;185;80):\n%s", raw)
+	}
+
+	off := New(nil)
+	off.width = 120
+	off.activeSubTab = subTabLogs
+	off.containers = makeTestContainers(1)
+	off.logFollow = false
+	rawOff := off.renderSubLogView(100, 10)
+	if !regexp.MustCompile(`\x1b\[[0-9;]*38;2;139;147;158[0-9;]*m○`).MatchString(rawOff) {
+		tt.Errorf("follow OFF circle not muted-gray (139;147;158):\n%s", rawOff)
 	}
 }
 
@@ -557,8 +587,8 @@ func TestLogHeaderRendersCheckbox(tt *testing.T) {
 	on.containers = makeTestContainers(1)
 	on.activeSubTab = subTabLogs
 	on.logFollow = true
-	if out := stripANSI(on.renderSubLogView(100, 10)); !strings.Contains(out, "[x] follow") {
-		tt.Errorf("header with follow ON missing [x] follow:\n%s", out)
+	if out := stripANSI(on.renderSubLogView(100, 10)); !strings.Contains(out, "● follow") {
+		tt.Errorf("header with follow ON missing '● follow':\n%s", out)
 	}
 
 	off := New(nil)
@@ -566,8 +596,8 @@ func TestLogHeaderRendersCheckbox(tt *testing.T) {
 	off.containers = makeTestContainers(1)
 	off.activeSubTab = subTabLogs
 	off.logFollow = false
-	if out := stripANSI(off.renderSubLogView(100, 10)); !strings.Contains(out, "[ ] follow") {
-		tt.Errorf("header with follow OFF missing [ ] follow:\n%s", out)
+	if out := stripANSI(off.renderSubLogView(100, 10)); !strings.Contains(out, "○ follow") {
+		tt.Errorf("header with follow OFF missing '○ follow':\n%s", out)
 	}
 }
 
