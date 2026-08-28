@@ -348,6 +348,7 @@ func TestContainerLogMsgFollowBehavior(tt *testing.T) {
 	m.width = 120
 	m.height = 30
 	m.ready = true
+	m.logFollow = false
 	m.containers = makeTestContainers(1)
 	m.containerLogViewport = viewport.New(80, 5)
 
@@ -371,6 +372,104 @@ func TestContainerLogMsgFollowBehavior(tt *testing.T) {
 	next3 := testMouseUpdate(back, containerLogMsg(strings.Repeat("line\n", 40)))
 	if got := next3.containerLogViewport.YOffset; got != 35 { // 40 lines - 5 height
 		tt.Errorf("follow YOffset = %d, want 36 (bottom)", got)
+	}
+}
+
+func TestContainerLogMsgFollowForced(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.logFollow = true // checkbox on: always chase the tail
+	m.containers = makeTestContainers(1)
+	m.containerLogViewport = viewport.New(80, 5)
+
+	next := testMouseUpdate(m, containerLogMsg(strings.Repeat("line\n", 30)))
+	// reading at the very top, new lines arrive: follow must still snap to bottom
+	next.containerLogViewport.YOffset = 0
+	next2 := testMouseUpdate(next, containerLogMsg(strings.Repeat("line\n", 40)))
+	if got := next2.containerLogViewport.YOffset; got != 35 { // 40 lines - 5 height
+		tt.Errorf("forced follow YOffset = %d, want 35 (bottom)", got)
+	}
+}
+
+func TestFollowToggleKey(tt *testing.T) {
+	m := New(nil)
+	m.activeTab = tabContainers
+	m.activeSubTab = subTabLogs
+	m.containers = makeTestContainers(1)
+
+	// default is on
+	if !m.logFollow {
+		tt.Fatal("default logFollow = false, want true")
+	}
+
+	next := testMouseUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	if next.logFollow {
+		tt.Error("key 'f' did not toggle logFollow off")
+	}
+	next2 := testMouseUpdate(next, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	if !next2.logFollow {
+		tt.Error("key 'f' did not toggle logFollow back on")
+	}
+}
+
+func TestFollowToggleClick(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.activeTab = tabContainers
+	m.activeSubTab = subTabLogs
+	m.containers = makeTestContainers(1)
+
+	contentH := m.height - tabBarHeight - helpBarHeight
+	topH := int(float64(contentH) * splitRatio)
+	start, _ := m.followCheckboxCols()
+	click := tea.MouseMsg{Type: tea.MouseLeft, X: appMarginX + start, Y: topH + 3 + tabBarHeight}
+
+	next := testMouseUpdate(m, click)
+	if next.logFollow {
+		tt.Error("click on checkbox did not toggle logFollow off")
+	}
+}
+
+func TestFollowCheckboxGlyph(tt *testing.T) {
+	on := New(nil)
+	on.logFollow = true
+	off := New(nil)
+	off.logFollow = false
+	if got := on.followCheckboxGlyph(); got != "[x]" {
+		tt.Errorf("on glyph = %q, want %q", got, "[x]")
+	}
+	if got := off.followCheckboxGlyph(); got != "[ ]" {
+		tt.Errorf("off glyph = %q, want %q", got, "[ ]")
+	}
+	if got := on.followCheckboxText(); got != "[x] follow" {
+		tt.Errorf("on text = %q, want %q", got, "[x] follow")
+	}
+	if got := off.followCheckboxText(); got != "[ ] follow" {
+		tt.Errorf("off text = %q, want %q", got, "[ ] follow")
+	}
+}
+
+func TestLogHeaderRendersCheckbox(tt *testing.T) {
+	on := New(nil)
+	on.width = 120
+	on.containers = makeTestContainers(1)
+	on.activeSubTab = subTabLogs
+	on.logFollow = true
+	if out := stripANSI(on.renderSubLogView(100, 10)); !strings.Contains(out, "[x] follow") {
+		tt.Errorf("header with follow ON missing [x] follow:\n%s", out)
+	}
+
+	off := New(nil)
+	off.width = 120
+	off.containers = makeTestContainers(1)
+	off.activeSubTab = subTabLogs
+	off.logFollow = false
+	if out := stripANSI(off.renderSubLogView(100, 10)); !strings.Contains(out, "[ ] follow") {
+		tt.Errorf("header with follow OFF missing [ ] follow:\n%s", out)
 	}
 }
 

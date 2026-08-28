@@ -73,6 +73,7 @@ type Model struct {
 	height  int
 
 	activeSubTab         subTab
+	logFollow            bool
 	containerLogContent  string
 	containerLogViewport viewport.Model
 	details              *docker.ContainerDetails
@@ -89,6 +90,7 @@ func New(dcli *docker.Client) Model {
 		spinner:     s,
 		help:        help.New(),
 		showAll:     true,
+		logFollow:   true,
 		selectedIdx: 0,
 	}
 }
@@ -170,6 +172,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.toggleContainer()
 		case key.Matches(msg, keys.Restart):
 			return m, m.restartContainer()
+		case key.Matches(msg, keys.Follow):
+			if m.activeTab == tabContainers && m.activeSubTab == subTabLogs {
+				m.logFollow = !m.logFollow
+			}
+			return m, nil
 		case key.Matches(msg, keys.Back):
 			if m.activeTab == tabContainers && m.activeSubTab == subTabLogs {
 				m.activeSubTab = subTabInfo
@@ -239,9 +246,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Store pre-wrapped text so the persistent viewport's line count
 		// matches what the pane displays - otherwise AtBottom/GotoBottom
 		// anchor to the wrong offsets and fresh lines pile up off-screen.
-		// Follow the tail only when the user is already at the bottom;
-		// otherwise preserve their reading position.
-		follow := m.containerLogViewport.AtBottom()
+		// Follow the tail always when the checkbox is on; otherwise only
+		// when the user is already at the bottom.
+		follow := m.logFollow || m.containerLogViewport.AtBottom()
 		m.containerLogContent = wrapText(string(msg), innerW(m.width)-1)
 		m.containerLogViewport.SetContent(m.containerLogContent)
 		if follow {
@@ -617,11 +624,24 @@ func (m Model) renderSubLogView(w, bottomH int) string {
 	name := strings.TrimPrefix(c.Names[0], "/")
 
 	rowStyle := lipgloss.NewStyle().Background(t.Background)
+	followGlyphStyle := rowStyle.Copy()
+	followLabelStyle := rowStyle.Copy()
+	if m.logFollow {
+		followGlyphStyle = followGlyphStyle.Foreground(t.Accent)
+		followLabelStyle = followLabelStyle.Foreground(t.Foreground)
+	} else {
+		followGlyphStyle = followGlyphStyle.Foreground(t.Muted)
+		followLabelStyle = followLabelStyle.Foreground(t.Muted)
+	}
+	headerLeft := " Logs: " + name + "  "
 	header := lipgloss.JoinHorizontal(lipgloss.Top,
 		rowStyle.Copy().Foreground(t.Accent).Bold(true).Render(" Logs: "),
-		rowStyle.Copy().Foreground(t.Foreground).Bold(true).Render(name),
-		rowStyle.Copy().Foreground(t.Muted).Render("   Esc back "),
-		rowStyle.Render(strings.Repeat(" ", w-len([]rune(" Logs: "+name+"   Esc back ")))),
+		rowStyle.Copy().Foreground(t.Foreground).Render(name),
+		rowStyle.Copy().Foreground(t.Muted).Render("  "),
+		followGlyphStyle.Render(m.followCheckboxGlyph()),
+		rowStyle.Copy().Foreground(t.Muted).Render(" "),
+		followLabelStyle.Render("follow"),
+		rowStyle.Render(strings.Repeat(" ", w-len([]rune(headerLeft+m.followCheckboxText())))),
 	)
 
 	m.containerLogViewport.Width = w - 1                     // viewport shares the pane with the scrollbar column
@@ -638,6 +658,31 @@ func (m Model) renderSubLogView(w, bottomH int) string {
 	return lipgloss.Place(w, bottomH, lipgloss.Top, lipgloss.Left, content,
 		lipgloss.WithWhitespaceBackground(t.Background),
 	)
+}
+
+// followCheckboxGlyph renders the follow-the-tail checkbox marker.
+func (m Model) followCheckboxGlyph() string {
+	if m.logFollow {
+		return "[x]"
+	}
+	return "[ ]"
+}
+
+// followCheckboxText is the combined glyph+label, used as the size oracle
+// for click-zones and header padding, matching the rendered row.
+func (m Model) followCheckboxText() string {
+	return m.followCheckboxGlyph() + " follow"
+}
+
+// followCheckboxCols returns the column range (content x) of the follow
+// checkbox in the Logs pane header, matching followCheckboxText.
+func (m Model) followCheckboxCols() (start, end int) {
+	if len(m.containers) == 0 || m.selectedIdx >= len(m.containers) {
+		return -1, -1
+	}
+	name := strings.TrimPrefix(m.containers[m.selectedIdx].Names[0], "/")
+	start = lipgloss.Width(" Logs: " + name + "  ")
+	return start, start + lipgloss.Width(m.followCheckboxText())
 }
 
 // renderVScroll renders a 1-column vertical scrollbar for a viewport of
@@ -863,6 +908,15 @@ func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
 				}
 			}
 			return m, nil
+		}
+
+		// Logs pane header: click on the follow checkbox toggles it.
+		if m.activeTab == tabContainers && m.activeSubTab == subTabLogs &&
+			absY == topH+3 && len(m.containers) > 0 && m.selectedIdx < len(m.containers) {
+			if start, end := m.followCheckboxCols(); x >= start && x < end {
+				m.logFollow = !m.logFollow
+				return m, nil
+			}
 		}
 
 		// Table rows
