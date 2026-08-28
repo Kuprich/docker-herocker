@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	mclient "github.com/moby/moby/client"
 )
@@ -217,6 +218,25 @@ func (c *Client) ContainerLogs(id, tail string, follow bool) (io.ReadCloser, err
 		Timestamps: true,
 		Tail:       tail,
 		Follow:     follow,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// ContainerLogsSince fetches log lines written strictly after since. The
+// daemon treats its since filter as inclusive and truncates to microsecond
+// precision, so a 1ms offset is added to the cursor; otherwise the line whose
+// timestamp equals the cursor would be re-read on every tick and duplicated.
+func (c *Client) ContainerLogsSince(id string, since time.Time) (io.ReadCloser, error) {
+	s := since.UTC().Add(time.Millisecond)
+	res, err := c.cli.ContainerLogs(context.Background(), id, mclient.ContainerLogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Timestamps: true,
+		Since:      s.Format(time.RFC3339Nano),
+		Follow:     false,
 	})
 	if err != nil {
 		return nil, err

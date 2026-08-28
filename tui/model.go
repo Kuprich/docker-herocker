@@ -31,7 +31,16 @@ type imageMsg []docker.Image
 type volumeMsg []docker.Volume
 type networkMsg []docker.Network
 type errMsg struct{ err error }
-type containerLogMsg string
+
+// containerLogMsg carries freshly fetched log lines. incremental reports
+// whether content is a since-based append (true) or a full tail replace
+// (false), so the handler can distinguish a pending incremental fetch from
+// a manual resync.
+type containerLogMsg struct {
+	id          string
+	content     string
+	incremental bool
+}
 
 // silentErrMsg is a background-fetch failure (logs/details) that must not
 // pollute the global error state shown to the user.
@@ -76,6 +85,8 @@ type Model struct {
 	logFollow            bool
 	containerLogContent  string
 	containerLogViewport viewport.Model
+	containerLogID       string
+	containerLogLastTS   time.Time
 	details              *docker.ContainerDetails
 	detailsID            string
 	detailViewport       viewport.Model
@@ -100,15 +111,23 @@ func (m Model) Init() tea.Cmd {
 		m.refreshNow(),
 		m.loadContainerDetails(),
 		refreshTicker(),
+		logRefreshTicker(),
 		m.spinner.Tick,
 	)
 }
 
-// refreshTickMsg drives the single global auto-refresh ticker.
+// refreshTickMsg drives the global list auto-refresh ticker.
 type refreshTickMsg struct{}
 
 func refreshTicker() tea.Cmd {
 	return tea.Tick(refreshInterval, func(time.Time) tea.Msg { return refreshTickMsg{} })
+}
+
+// logRefreshTickMsg is the dedicated fast ticker for the Logs pane.
+type logRefreshTickMsg struct{}
+
+func logRefreshTicker() tea.Cmd {
+	return tea.Tick(logRefreshInterval, func(time.Time) tea.Msg { return logRefreshTickMsg{} })
 }
 
 // innerW returns the content width available to all renderers inside the
@@ -196,7 +215,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case refreshTickMsg:
-		return m, tea.Batch(m.refreshNow(), m.autoRefreshLogs(), refreshTicker())
+		return m, tea.Batch(m.refreshNow(), refreshTicker())
+
+	case logRefreshTickMsg:
+		var cmd tea.Cmd = logRefreshTicker()
+		if m.activeTab == tabContainers && m.activeSubTab == subTabLogs {
+			cmd = tea.Batch(cmd, m.autoRefreshLogs())
+		}
+		return m, cmd
 
 	case containerMsg:
 		m.containers = msg
@@ -243,13 +269,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case containerLogMsg:
+		// Drop fetches for a container we are no longer viewing (races
+		// between selection changes and in-flight requests).
+		if m.selectedIdx >= len(m.containers) || m.containers[m.selectedIdx].ID != msg.id {
+			return m, nil
+		}
 		// Store pre-wrapped text so the persistent viewport's line count
 		// matches what the pane displays - otherwise AtBottom/GotoBottom
 		// anchor to the wrong offsets and fresh lines pile up off-screen.
 		// Follow the tail always when the checkbox is on; otherwise only
 		// when the user is already at the bottom.
 		follow := m.logFollow || m.containerLogViewport.AtBottom()
-		m.containerLogContent = wrapText(string(msg), innerW(m.width)-1)
+		wrapped := wrapText(msg.content, innerW(m.width)-1)
+		if msg.incremental {
+			if wrapped != "" {
+				if m.containerLogContent != "" {
+					m.containerLogContent += "\n"
+				}
+				m.containerLogContent += wrapped
+				if lines := strings.Count(m.containerLogContent, "\n") + 1; lines > 2*logMaxWrappedLines {
+					m.containerLogContent = pruneLines(m.containerLogContent, logMaxWrappedLines)
+				}
+			}
+		} else {
+			m.containerLogContent = wrapped
+		}
+		m.containerLogID = msg.id
+		if ts, ok := containerLogCursor(msg.content); ok {
+			m.containerLogLastTS = ts
+		}
 		m.containerLogViewport.SetContent(m.containerLogContent)
 		if follow {
 			m.containerLogViewport.GotoBottom()
@@ -1246,6 +1294,38 @@ func wrapText(text string, width int) string {
 	return strings.TrimRight(result.String(), "\n")
 }
 
+// containerLogCursor extracts the timestamp prefix of the newest non-empty
+// line (docker Timestamps:true format, RFC3339Nano) for incremental fetches.
+func containerLogCursor(content string) (time.Time, bool) {
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := lines[i]
+		if line == "" {
+			continue
+		}
+		ts := line
+		if sp := strings.IndexByte(line, ' '); sp > 0 {
+			ts = line[:sp]
+		}
+		t, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			continue
+		}
+		return t, true
+	}
+	return time.Time{}, false
+}
+
+// pruneLines keeps only the last n lines of s, used to bound the pre-wrapped
+// log buffer after incremental appends.
+func pruneLines(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) <= n {
+		return s
+	}
+	return strings.Join(lines[len(lines)-n:], "\n")
+}
+
 // ---- navigation ----
 
 // switchTab activates a tab and resets the selection to its top - the
@@ -1380,8 +1460,15 @@ func (m Model) loadContainerLogs() tea.Cmd {
 		return nil
 	}
 	c := m.containers[m.selectedIdx]
+	inc := m.logFetchPlan(c)
 	return func() tea.Msg {
-		reader, err := m.docker.ContainerLogs(c.ID, logTail, false)
+		var reader io.ReadCloser
+		var err error
+		if inc {
+			reader, err = m.docker.ContainerLogsSince(c.ID, m.containerLogLastTS)
+		} else {
+			reader, err = m.docker.ContainerLogs(c.ID, logTail, false)
+		}
 		if err != nil {
 			return silentErrMsg{err}
 		}
@@ -1390,8 +1477,24 @@ func (m Model) loadContainerLogs() tea.Cmd {
 		if err != nil {
 			return errMsg{err}
 		}
-		return containerLogMsg(docker.StripDockerStreamHeaders(data))
+		return containerLogMsg{id: c.ID, content: docker.StripDockerStreamHeaders(data), incremental: inc}
 	}
+}
+
+// logFetchPlan decides whether the next log fetch for c can be an
+// incremental since-based append or must be a full tail reload. A cursor
+// applies only to the container whose ID produced it; anything else (new
+// selection, list refresh, container recreated after compose down/up) starts
+// over with a full tail. A stale cursor older than logResyncGap also forces
+// a full reload to avoid unbounded since-based catch-up.
+func (m Model) logFetchPlan(c docker.Container) bool {
+	if m.containerLogID != c.ID {
+		return false
+	}
+	if m.containerLogLastTS.IsZero() {
+		return false
+	}
+	return time.Since(m.containerLogLastTS) <= logResyncGap
 }
 
 // autoRefreshLogs re-fetches logs on every refresh tick while the Logs

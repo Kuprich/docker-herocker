@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -352,26 +353,26 @@ func TestContainerLogMsgFollowBehavior(tt *testing.T) {
 	m.containers = makeTestContainers(1)
 	m.containerLogViewport = viewport.New(80, 5)
 
-	// first load on an empty viewport: must jump to bottom
-	next := testMouseUpdate(m, containerLogMsg(strings.Repeat("line\n", 30)))
+	// first load on an empty viewport: full tail replace must jump to bottom
+	next := testMouseUpdate(m, logMsg(m, strings.Repeat("line\n", 30), false))
 	if got := next.containerLogViewport.YOffset; got != 25 { // wrapText trims trailing newline: 30 lines - 5 height
 		tt.Errorf("initial load YOffset = %d, want 26 (bottom)", got)
 	}
 
-	// user scrolled up to read history: refresh must keep their position
+	// user scrolled up to read history: incremental refresh must keep position
 	scrolled := next
 	scrolled.containerLogViewport.YOffset = 0
-	next2 := testMouseUpdate(scrolled, containerLogMsg(strings.Repeat("line\n", 35)))
+	next2 := testMouseUpdate(scrolled, logMsg(scrolled, strings.Repeat("line\n", 35), true))
 	if got := next2.containerLogViewport.YOffset; got != 0 {
 		tt.Errorf("YOffset after refresh while reading = %d, want 0 (position preserved)", got)
 	}
 
 	// back to bottom: refresh follows the tail again
 	back := next2
-	back.containerLogViewport.YOffset = 31 // 36 lines - 5 height = bottom
-	next3 := testMouseUpdate(back, containerLogMsg(strings.Repeat("line\n", 40)))
-	if got := next3.containerLogViewport.YOffset; got != 35 { // 40 lines - 5 height
-		tt.Errorf("follow YOffset = %d, want 36 (bottom)", got)
+	back.containerLogViewport.YOffset = 60 // 65 lines - 5 height = bottom
+	next3 := testMouseUpdate(back, logMsg(back, strings.Repeat("line\n", 40), true))
+	if got := next3.containerLogViewport.YOffset; got != 100 { // 105 lines - 5 height
+		tt.Errorf("follow YOffset = %d, want 101 (bottom)", got)
 	}
 }
 
@@ -384,12 +385,109 @@ func TestContainerLogMsgFollowForced(tt *testing.T) {
 	m.containers = makeTestContainers(1)
 	m.containerLogViewport = viewport.New(80, 5)
 
-	next := testMouseUpdate(m, containerLogMsg(strings.Repeat("line\n", 30)))
+	next := testMouseUpdate(m, logMsg(m, strings.Repeat("line\n", 30), false))
 	// reading at the very top, new lines arrive: follow must still snap to bottom
 	next.containerLogViewport.YOffset = 0
-	next2 := testMouseUpdate(next, containerLogMsg(strings.Repeat("line\n", 40)))
-	if got := next2.containerLogViewport.YOffset; got != 35 { // 40 lines - 5 height
-		tt.Errorf("forced follow YOffset = %d, want 35 (bottom)", got)
+	next2 := testMouseUpdate(next, logMsg(next, strings.Repeat("line\n", 40), true))
+	if got := next2.containerLogViewport.YOffset; got != 65 { // 70 lines - 5 height
+		tt.Errorf("forced follow YOffset = %d, want 65 (bottom)", got)
+	}
+}
+
+// logMsg builds a containerLogMsg for the model's selected container.
+func logMsg(m Model, content string, incremental bool) containerLogMsg {
+	return containerLogMsg{id: m.containers[m.selectedIdx].ID, content: content, incremental: incremental}
+}
+
+func TestContainerLogMsgIncrementalAppends(tt *testing.T) {
+	id := "aaaaaaaaaaaa"
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.containers = makeTestContainers(1)
+	m.containerLogViewport = viewport.New(80, 5)
+	base, _ := time.Parse(time.RFC3339Nano, "2026-08-28T13:07:03.000000001Z")
+	m.containerLogID = id
+	m.containerLogLastTS = base
+
+	msg := containerLogMsg{
+		id:          id,
+		content:     "2026-08-28T13:07:03.100000001Z alpha\n2026-08-28T13:07:03.200000001Z beta\n",
+		incremental: true,
+	}
+	next := testMouseUpdate(m, msg)
+	if !strings.Contains(next.containerLogContent, "alpha") || !strings.Contains(next.containerLogContent, "beta") {
+		tt.Errorf("incremental content not appended: %q", next.containerLogContent)
+	}
+	wantTS, _ := time.Parse(time.RFC3339Nano, "2026-08-28T13:07:03.200000001Z")
+	if !next.containerLogLastTS.Equal(wantTS) {
+		tt.Errorf("cursor = %v, want %v", next.containerLogLastTS, wantTS)
+	}
+	if next.containerLogID != id {
+		tt.Errorf("containerLogID = %q, want %q", next.containerLogID, id)
+	}
+}
+
+func TestContainerLogMsgStaleIDIgnored(tt *testing.T) {
+	m := New(nil)
+	m.containers = makeTestContainers(2)
+	m.selectedIdx = 0
+	next := testMouseUpdate(m, containerLogMsg{
+		id:          m.containers[1].ID, // different container
+		content:     "WRONG CONTENT",
+		incremental: false,
+	})
+	if next.containerLogContent != "" {
+		tt.Errorf("stale container log replaced content: %q", next.containerLogContent)
+	}
+}
+
+func TestLogFetchPlan(tt *testing.T) {
+	m := New(nil)
+	c := docker.Container{ID: "c1"}
+
+	if m.logFetchPlan(c) {
+		tt.Error("fresh model must do a full fetch")
+	}
+
+	m.containerLogID = "c1"
+	if m.logFetchPlan(c) {
+		tt.Error("matching ID but zero cursor must do a full fetch")
+	}
+
+	m.containerLogLastTS = time.Now()
+	if !m.logFetchPlan(c) {
+		tt.Error("matching ID with fresh cursor must do an incremental fetch")
+	}
+
+	m.containerLogLastTS = time.Now().Add(-10 * time.Second)
+	if m.logFetchPlan(c) {
+		tt.Error("stale cursor past logResyncGap must do a full fetch")
+	}
+
+	m.containerLogLastTS = time.Now()
+	m.containerLogID = "other"
+	if m.logFetchPlan(c) {
+		tt.Error("cursor belongs to a different container, must do a full fetch")
+	}
+}
+
+func TestContainerLogCursor(tt *testing.T) {
+	ts, ok := containerLogCursor("2026-08-28T13:07:03.100000001Z a\n2026-08-28T13:07:03.200000001Z b\n")
+	if !ok {
+		tt.Fatal("expected parseable cursor")
+	}
+	want, _ := time.Parse(time.RFC3339Nano, "2026-08-28T13:07:03.200000001Z")
+	if !ts.Equal(want) {
+		tt.Errorf("cursor = %v, want %v", ts, want)
+	}
+
+	if _, ok := containerLogCursor("no timestamp at all\nmore text\n"); ok {
+		tt.Error("unparseable content must report ok=false")
+	}
+	if _, ok := containerLogCursor(""); ok {
+		tt.Error("empty content must report ok=false")
 	}
 }
 
