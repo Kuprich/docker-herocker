@@ -960,6 +960,29 @@ func TestDecorateSelectionSpansRows(tt *testing.T) {
 	})
 }
 
+func TestDecorateSelectionPlainRowNoBareTail(tt *testing.T) {
+	withTrueColor(tt, func() {
+		// A selected plain row (padded to width w upstream) must never leave
+		// unstyled cells right of the sel span: the span ends in a reset, so
+		// the prefix AND suffix are re-painted with the theme background.
+		m := New(nil)
+		w := 80
+		m.containers = makeTestContainers(1)
+		sel := textSel{active: true, anR: 1, anC: 2, endR: 1, endC: 9}
+		out := decorateSelection(m.buildDetailContent(w), sel)
+		for i, ln := range strings.Split(out, "\n") {
+			for _, bare := range []string{"\x1b[0m ", "\x1b[0m\x1b[0m"} {
+				if strings.Contains(ln, bare) {
+					tt.Errorf("row %d leaks unstyled cells after a reset: %q", i, ln)
+				}
+			}
+			if strings.Contains(ln, "Name") && !strings.Contains(ln, "48;2;44;73;46") {
+				tt.Errorf("selected Name row missing highlight: %q", ln)
+			}
+		}
+	})
+}
+
 func TestDecorateSelectionStyledRowFallsBackWholeLine(tt *testing.T) {
 	withTrueColor(tt, func() {
 		styled := "\x1b[36m" + "Title" + "\x1b[0m"

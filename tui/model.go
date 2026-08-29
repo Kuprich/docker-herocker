@@ -759,23 +759,22 @@ func (m Model) buildDetailContent(w int) string {
 		lipgloss.NewStyle().Background(t.Background).
 			Render(strings.Repeat(" ", max(w-len([]rune(" Info:")), 0))) + "\n")
 
-	line := func(label, value string) {
-		fmt.Fprintf(&b, "  %-10s %s\n", label+":", tv(value))
-	}
-	// fillToWidth appends theme-background spaces so a line containing
-	// embedded ANSI resets still reaches the full block width - lipgloss
-	// pads shorter lines with UNSTYLED spaces after the last reset, which
-	// would show as default terminal background.
-	fillToWidth := func(v string) string {
-		used := 13 + valW // indent + label + gap + value width
-		if rest := w - used; rest > 0 {
-			return v + lipgloss.NewStyle().Background(t.Background).Render(strings.Repeat(" ", rest))
+	rowStyle := lipgloss.NewStyle().Background(t.Background)
+	// padLine pads any row to the full block width w with theme-background
+	// spaces - lipgloss pads shorter lines with UNSTYLED whitespace after the
+	// last ANSI reset, which would show as default terminal background.
+	padLine := func(s string) string {
+		if rest := w - lipgloss.Width(s); rest > 0 {
+			return s + rowStyle.Render(strings.Repeat(" ", rest))
 		}
-		return v
+		return s
+	}
+	line := func(label, value string) {
+		b.WriteString(padLine(fmt.Sprintf("  %-10s %s", label+":", tv(value))) + "\n")
 	}
 	// coloredLine renders the value in color when it fits, like colorize().
 	coloredLine := func(label, plain string, color lipgloss.Color) {
-		fmt.Fprintf(&b, "  %-10s %s\n", label+":", fillToWidth(colorize(plain, valW, color)))
+		b.WriteString(padLine(fmt.Sprintf("  %-10s %s", label+":", colorize(plain, valW, color))) + "\n")
 	}
 
 	line("Name", strings.TrimPrefix(c.Names[0], "/"))
@@ -784,7 +783,7 @@ func (m Model) buildDetailContent(w int) string {
 	coloredLine("Status", c.Status, stateColor(c.State))
 	coloredLine("State", c.State, stateColor(c.State))
 	if cell, ok := renderPortsCell(c.Ports, valW, t.Background); ok {
-		fmt.Fprintf(&b, "  %-10s %s\n", "Ports:", fillToWidth(cell))
+		b.WriteString(padLine(fmt.Sprintf("  %-10s %s", "Ports:", cell)) + "\n")
 	} else {
 		line("Ports", formatPorts(c.Ports))
 	}
@@ -797,7 +796,7 @@ func (m Model) buildDetailContent(w int) string {
 
 	d := m.details
 	if d == nil || m.detailsID != c.ID {
-		b.WriteString("\n  Loading details…")
+		b.WriteString("\n" + padLine("  Loading details…") + "\n")
 		return b.String()
 	}
 
@@ -807,7 +806,6 @@ func (m Model) buildDetailContent(w int) string {
 	}
 
 	section := lipgloss.NewStyle().Foreground(t.Accent).Bold(true)
-	rowStyle := lipgloss.NewStyle().Background(t.Background)
 	writeSection := func(title string) {
 		s := " " + title + ":"
 		pad := w - len([]rune(s))
@@ -836,7 +834,7 @@ func (m Model) buildDetailContent(w int) string {
 			nameCol = lim
 		}
 		for _, n := range names {
-			fmt.Fprintf(&b, "  %-*s %s\n", nameCol, Truncate(n, nameCol), tv(d.NetworkSettings.Networks[n].IPAddress))
+			b.WriteString(padLine(fmt.Sprintf("  %-*s %s", nameCol, Truncate(n, nameCol), tv(d.NetworkSettings.Networks[n].IPAddress))) + "\n")
 		}
 	}
 
@@ -851,7 +849,7 @@ func (m Model) buildDetailContent(w int) string {
 			if !mt.RW {
 				mode = "ro"
 			}
-			fmt.Fprintf(&b, "  %s -> %s (%s)\n", tv(mt.Destination), tv(src), mode)
+			b.WriteString(padLine(fmt.Sprintf("  %s -> %s (%s)", tv(mt.Destination), tv(src), mode)) + "\n")
 		}
 	}
 
@@ -863,7 +861,7 @@ func (m Model) buildDetailContent(w int) string {
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			fmt.Fprintf(&b, "  %s=%s\n", tv(k), tv(d.Config.Labels[k]))
+			b.WriteString(padLine(fmt.Sprintf("  %s=%s", tv(k), tv(d.Config.Labels[k]))) + "\n")
 		}
 	}
 
@@ -972,8 +970,15 @@ func decorateSelection(content string, sel textSel) string {
 			lines[i] = selTextStyle.Render(ansiStripped(lines[i]))
 			continue
 		}
+		// Plain rows are padded to the full block width upstream, but the
+		// sel span ends in an ANSI reset that would kill the theme background
+		// for everything right of it (a default-bg leak), so the untouched
+		// prefix/suffix are re-painted explicitly instead of left bare.
+		rowStyle := lipgloss.NewStyle().Background(t.Background).Foreground(t.Foreground)
 		rs := []rune(lines[i])
-		lines[i] = string(rs[:from]) + selTextStyle.Render(string(rs[from:to+1])) + string(rs[to+1:])
+		lines[i] = rowStyle.Render(string(rs[:from])) +
+			selTextStyle.Render(string(rs[from:to+1])) +
+			rowStyle.Render(string(rs[to+1:]))
 	}
 	return strings.Join(lines, "\n")
 }
