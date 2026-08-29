@@ -1321,7 +1321,18 @@ func (m *Model) fitDetailViewport() {
 	// content genuinely changes (details arrive, container switch) an active
 	// selection re-anchors on the matching text, like the Logs full reloads.
 	m.detailStyled = content
+	// padLine fills every row to the pane width with theme-styled spaces so a
+	// selection reset can never leak default terminal cells. Those fill spaces
+	// must not become part of a multi-row drag (they were highlighted AND
+	// copied), so the plain buffer stores the rows trimmed to their text.
 	plain := ansiStripped(content)
+	{
+		rows := strings.Split(plain, "\n")
+		for i := range rows {
+			rows[i] = strings.TrimRight(rows[i], " ")
+		}
+		plain = strings.Join(rows, "\n")
+	}
 	if prev := m.detailContent; prev != "" && prev != plain && m.detailSel.active {
 		if s, ok := reanchorSelection(prev, m.detailSel, plain); ok {
 			m.detailSel = s
