@@ -1042,7 +1042,7 @@ func TestCellToRuneColumnWideRow(tt *testing.T) {
 func TestStyleLogRowsPaintsThemeEverywhere(tt *testing.T) {
 	withTrueColor(tt, func() {
 		sel := textSel{active: true, anR: 0, anC: 1, endR: 0, endC: 2}
-		out := styleLogRows("aaa\nbbb", sel, 6, 4)
+		out := styleLogRows("aaa\nbbb", sel, 6, 4, 0)
 		lines := strings.Split(out, "\n")
 		if len(lines) != 4 {
 			tt.Fatalf("styleLogRows rows = %d, want 4", len(lines))

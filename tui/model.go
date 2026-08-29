@@ -877,22 +877,39 @@ func shortID(id string) string {
 	return id
 }
 
-// styleLogRows repaints the log buffer for the viewport: every row is styled
-// with the app's theme background/foreground and padded to exactly vw cells,
-// so no cell lets the terminal's default colors leak through, and the buffer
-// is padded up to height rows. Rows covered by sel get a highlighted span;
-// the rendered result keeps the same row count as the buffer (plus the pad)
-// so the persistent viewport's geometry is untouched.
-func styleLogRows(content string, sel textSel, vw, height int) string {
+// styleLogRows repaints the log buffer for the viewport: the rows currently
+// visible (yoff..yoff+height in buffer coordinates) are styled with the app's
+// theme background/foreground and padded to exactly vw cells, so no cell lets
+// the terminal's default colors leak through. Rows covered by sel get a
+// highlighted span. Only the visible window is styled (each lipgloss render is
+// measurable work), so a drag over a large buffer repaints a handful of rows
+// instead of the whole log. The non-visible rows are passed through raw and,
+// together with any pad rows, the result keeps the same row count as the
+// buffer so the persistent viewport's geometry and scrollbar stay untouched.
+func styleLogRows(content string, sel textSel, vw, height, yoff int) string {
 	row := lipgloss.NewStyle().Background(t.Background).Foreground(t.Foreground)
 	if vw <= 0 {
 		vw = 1
 	}
 	lines := strings.Split(content, "\n")
 	top, bot := min(sel.anR, sel.endR), max(sel.anR, sel.endR)
-	for i, ln := range lines {
-		if !sel.active || i < top || i > bot {
-			lines[i] = row.Width(vw).Render(ln)
+	// Pad a short buffer up to the pane height so the viewport still fills the
+	// pane with theme-background rows instead of terminal default cells.
+	for len(lines) < max(height, yoff+height) {
+		lines = append(lines, "")
+	}
+	lo := max(0, min(yoff, len(lines)-1))
+	hi := min(lo+height, len(lines))
+	for i := lo; i < hi; i++ {
+		ln := lines[i]
+		if !sel.active || i < top || i > bot || len(ln) == 0 {
+			// Pad rows and truly empty lines still need the theme background;
+			// an empty line inside the selection gets the highlight style.
+			if sel.active && i >= top && i <= bot {
+				lines[i] = selTextStyle.Width(vw).Render("")
+			} else {
+				lines[i] = row.Width(vw).Render(ln)
+			}
 			continue
 		}
 		from, to, ok := sel.rowSpan(i)
@@ -901,10 +918,6 @@ func styleLogRows(content string, sel textSel, vw, height int) string {
 			continue
 		}
 		rs := []rune(ln)
-		if len(rs) == 0 {
-			lines[i] = row.Width(vw).Render("")
-			continue
-		}
 		from = max(0, min(from, len(rs)-1))
 		if to < 0 || to >= len(rs) {
 			to = len(rs) - 1
@@ -918,9 +931,6 @@ func styleLogRows(content string, sel textSel, vw, height int) string {
 		used := runewidth.StringWidth(prefix) + runewidth.StringWidth(span)
 		lines[i] = row.Render(prefix) + selTextStyle.Render(span) +
 			row.Copy().Width(max(0, vw-used)).Render(suffix)
-	}
-	for len(lines) < height {
-		lines = append(lines, row.Width(vw).Render(""))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -1048,7 +1058,7 @@ func (m Model) renderSubLogView(w, bottomH int) string {
 	// The buffer is already wrapped at fetch time; styleLogRows repaints every
 	// row (and the trailing cells) with the app's theme background so the
 	// terminal default never shows through, keeping the line count identical.
-	styled := styleLogRows(m.containerLogContent, sel, w-1, m.containerLogViewport.Height)
+	styled := styleLogRows(m.containerLogContent, sel, w-1, m.containerLogViewport.Height, m.containerLogViewport.YOffset)
 	m.containerLogViewport.SetContent(styled)
 
 	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
