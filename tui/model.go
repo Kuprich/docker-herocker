@@ -57,6 +57,49 @@ const (
 	subTabLogs
 )
 
+// textSel is an app-owned span of text anchored in *buffer* coordinates
+// (rows/columns of the pre-wrapped content), so a selection stays put while
+// the viewport scrolls or fresh log lines stream in - unlike a terminal's
+// own screen-anchored selection.
+type textSel struct {
+	active     bool
+	anR, anC   int // anchor: buffer row + rune column where the drag began
+	endR, endC int // current drag endpoint
+}
+
+// rowSpan returns the rune-column span [from,to] the selection covers on the
+// given buffer row. A to of -1 means the whole row is selected.
+func (s textSel) rowSpan(row int) (from, to int, ok bool) {
+	top, bot := min(s.anR, s.endR), max(s.anR, s.endR)
+	if row < top || row > bot {
+		return 0, 0, false
+	}
+	if top == bot {
+		return min(s.anC, s.endC), max(s.anC, s.endC), true
+	}
+	if row == top {
+		col := s.anC
+		if s.anR > s.endR {
+			col = s.endC
+		}
+		return col, -1, true
+	}
+	if row == bot {
+		col := s.anC
+		if s.anR < s.endR {
+			col = s.endC
+		}
+		return 0, col, true
+	}
+	return 0, -1, true
+}
+
+// isTrivial reports whether the selection covers nothing but the single
+// cell where the drag started (i.e. a plain click, which should clear).
+func (s textSel) isTrivial() bool {
+	return s.anR == s.endR && s.anC == s.endC
+}
+
 type Model struct {
 	docker *docker.Client
 
@@ -85,6 +128,8 @@ type Model struct {
 	logFollow            bool
 	containerLogContent  string
 	containerLogViewport viewport.Model
+	logSel               textSel
+	dragSel              bool
 	containerLogID       string
 	containerLogLastTS   time.Time
 	details              *docker.ContainerDetails
@@ -169,6 +214,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case msg.String() == "left":
 			if m.activeTab == tabContainers {
 				m.activeSubTab = subTabInfo
+				m.logSel = textSel{}
+				m.dragSel = false
 				return m, m.loadContainerDetails()
 			}
 		case msg.String() == "right":
@@ -198,7 +245,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case key.Matches(msg, keys.Back):
 			if m.activeTab == tabContainers && m.activeSubTab == subTabLogs {
-				m.activeSubTab = subTabInfo
+				if m.logSel.active || m.dragSel {
+					m.logSel = textSel{}
+					m.dragSel = false
+				} else {
+					m.activeSubTab = subTabInfo
+				}
 			}
 		case key.Matches(msg, keys.One):
 			m.switchTab(tabContainers)
@@ -278,8 +330,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// matches what the pane displays - otherwise AtBottom/GotoBottom
 		// anchor to the wrong offsets and fresh lines pile up off-screen.
 		// Follow the tail always when the checkbox is on; otherwise only
-		// when the user is already at the bottom.
-		follow := m.logFollow || m.containerLogViewport.AtBottom()
+		// when the user is already at the bottom. A live selection (or an
+		// in-flight drag) freezes the view so new lines can't scroll the
+		// highlighted rows off-screen; follow resumes once it is cleared.
+		follow := (m.logFollow || m.containerLogViewport.AtBottom()) && !m.logSel.active && !m.dragSel
 		wrapped := wrapText(msg.content, innerW(m.width)-1)
 		if msg.incremental {
 			if wrapped != "" {
@@ -289,10 +343,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.containerLogContent += wrapped
 				if lines := strings.Count(m.containerLogContent, "\n") + 1; lines > 2*logMaxWrappedLines {
 					m.containerLogContent = pruneLines(m.containerLogContent, logMaxWrappedLines)
+					// pruning drops the oldest lines, so buffer-anchored
+					// selection rows would point at the wrong text
+					m.logSel = textSel{}
+					m.dragSel = false
 				}
 			}
 		} else {
-			m.containerLogContent = wrapped
+			// A full replace often just re-issues the same tail after a quiet
+			// period (an exited/quiet container gets a full reload on every
+			// tick once its cursor goes stale). If the content is byte-for-byte
+			// unchanged, the view rows keep their identity, so an active
+			// selection AND an in-flight drag must be left untouched. Only a
+			// genuinely different buffer re-maps the selection by text and
+			// cancels a mid-flight drag (container recreated, log rotated).
+			if m.containerLogContent != wrapped {
+				oldContent, oldSel := m.containerLogContent, m.logSel
+				m.containerLogContent = wrapped
+				if s, ok := reanchorSelection(oldContent, oldSel, wrapped); ok {
+					m.logSel = s
+				} else {
+					m.logSel = textSel{}
+				}
+				m.dragSel = false
+			}
 		}
 		m.containerLogID = msg.id
 		if ts, ok := containerLogCursor(msg.content); ok {
@@ -323,6 +397,55 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.MouseMsg:
+		if msg.Shift || msg.Ctrl || msg.Alt {
+			// Let the terminal perform its own native text selection
+			// (Shift+drag). Some emulators still forward the drag events to
+			// the app, so ignore them instead of jumping/clicking mid-select.
+			return m, nil
+		}
+
+		// Logs pane: the left button drags an app-owned text selection over
+		// the log body (reжим A). It is anchored in buffer coordinates so it
+		// tracks correctly through scroll and follow-appends. Sub-tab strip,
+		// follow-checkbox and scrollbar presses keep their original handling.
+		if m.activeTab == tabContainers && m.activeSubTab == subTabLogs {
+			leftDown := msg.Type == tea.MouseLeft && msg.Action != tea.MouseActionMotion
+			leftMove := msg.Type == tea.MouseLeft && msg.Action == tea.MouseActionMotion
+			up := msg.Action == tea.MouseActionRelease
+			if leftDown || leftMove || up {
+				// Only left-button presses/motions and releases are ours to
+				// consume; wheel and other buttons fall through below so the
+				// viewport keeps scrolling.
+				if m.dragSel {
+					switch {
+					case leftDown:
+						if r, c, ok := m.logScreenToCell(msg.X, msg.Y, false); ok {
+							m.logSel = textSel{anR: r, anC: c, endR: r, endC: c}
+						}
+					case leftMove:
+						if r, c, ok := m.logScreenToCell(msg.X, msg.Y, true); ok {
+							m.logSel.endR, m.logSel.endC = r, c
+						}
+					case up:
+						m.finishLogSelection(msg.X, msg.Y)
+					}
+					return m, nil
+				}
+				if leftDown {
+					if r, c, ok := m.logScreenToCell(msg.X, msg.Y, false); ok {
+						m.dragSel = true
+						m.logSel = textSel{anR: r, anC: c, endR: r, endC: c}
+						return m, nil
+					}
+					// Header, sub-tab strip or scrollbar column: act as a click.
+					return m.handleClick(msg.X, msg.Y)
+				}
+				// Motion / release without an active drag: swallow so a
+				// release can never double-fire a press-side click action.
+				return m, nil
+			}
+		}
+
 		if msg.Type == tea.MouseLeft {
 			return m.handleClick(msg.X, msg.Y)
 		}
@@ -391,7 +514,7 @@ func (m Model) renderHelpBar() string {
 	if m.helpOn {
 		return HelpBarStyle.Width(cw).Render(m.help.View(keys))
 	}
-	h := " 1-4  tabs  •  ↑/↓  navigate  •  ←/→  Info/Logs  •  Space  start/stop  •  r  restart  •  a  all  •  ?  help"
+	h := " 1-4  tabs  •  ↑/↓  navigate  •  ←/→  Info/Logs  •  Space  start/stop  •  r  restart  •  a  all  •  ?  help  •  Shift+drag  select"
 	return HelpBarStyle.Width(cw).Render(h)
 }
 
@@ -661,6 +784,88 @@ func shortID(id string) string {
 	return id
 }
 
+// decorateSelection re-renders content with an app-owned text selection
+// highlighted. Rows are addresses in buffer coordinates, and the rendered
+// result keeps exactly the same line count as the input so the persistent
+// viewport's geometry is untouched.
+func decorateSelection(content string, sel textSel) string {
+	if !sel.active {
+		return content
+	}
+	lines := strings.Split(content, "\n")
+	top, bot := min(sel.anR, sel.endR), max(sel.anR, sel.endR)
+	if top < 0 || top >= len(lines) {
+		return content
+	}
+	for i := top; i <= bot && i < len(lines); i++ {
+		from, to, ok := sel.rowSpan(i)
+		if !ok {
+			continue
+		}
+		n := len([]rune(lines[i]))
+		if n == 0 {
+			continue
+		}
+		from = max(0, min(from, n-1))
+		if to < 0 || to >= n {
+			to = n - 1
+		}
+		if from > to {
+			from, to = to, from
+		}
+		// A styled row (Info headers etc.) gets highlighted wholesale, since
+		// interleaving styles would double-apply backgrounds and drop the
+		// original color accents.
+		if strings.ContainsRune(lines[i], '\x1b') {
+			lines[i] = selTextStyle.Render(ansiStripped(lines[i]))
+			continue
+		}
+		rs := []rune(lines[i])
+		lines[i] = string(rs[:from]) + selTextStyle.Render(string(rs[from:to+1])) + string(rs[to+1:])
+	}
+	return strings.Join(lines, "\n")
+}
+
+// selectedText returns the visible text covered by the selection, one line
+// per buffer row, in the order it appears on screen.
+func selectedText(content string, sel textSel) string {
+	if !sel.active {
+		return ""
+	}
+	lines := strings.Split(content, "\n")
+	top, bot := min(sel.anR, sel.endR), max(sel.anR, sel.endR)
+	if top < 0 || top >= len(lines) {
+		return ""
+	}
+	var sb strings.Builder
+	for i := top; i <= bot && i < len(lines); i++ {
+		line := lines[i]
+		if strings.ContainsRune(line, '\x1b') {
+			line = ansiStripped(line)
+		}
+		from, to, ok := sel.rowSpan(i)
+		if !ok {
+			continue
+		}
+		n := len([]rune(line))
+		if to < 0 || to >= n {
+			to = n - 1
+		}
+		if n == 0 {
+			continue
+		}
+		from = max(0, min(from, n-1))
+		if from > to {
+			from, to = to, from
+		}
+		sb.WriteString(string([]rune(line)[from : to+1]))
+		if i < bot {
+			sb.WriteString("\n")
+		}
+	}
+	return sb.String()
+}
+
 func (m Model) renderSubLogView(w, bottomH int) string {
 	if len(m.containers) == 0 || m.selectedIdx >= len(m.containers) {
 		return lipgloss.Place(w, bottomH, lipgloss.Top, lipgloss.Left,
@@ -692,9 +897,17 @@ func (m Model) renderSubLogView(w, bottomH int) string {
 		rowStyle.Render(strings.Repeat(" ", w-len([]rune(headerLeft+m.followCheckboxText())))),
 	)
 
-	m.containerLogViewport.Width = w - 1                     // viewport shares the pane with the scrollbar column
-	m.containerLogViewport.Height = max(bottomH-3, 1)        // header + separator + blank gap row
-	m.containerLogViewport.SetContent(m.containerLogContent) // already wrapped at fetch time
+	logContent := m.containerLogContent
+	sel := m.logSel
+	if m.dragSel && !sel.active {
+		sel.active = true // live highlight while the drag is in flight
+	}
+	if sel.active {
+		logContent = decorateSelection(logContent, sel)
+	}
+	m.containerLogViewport.Width = w - 1              // viewport shares the pane with the scrollbar column
+	m.containerLogViewport.Height = max(bottomH-3, 1) // header + separator + blank gap row
+	m.containerLogViewport.SetContent(logContent)     // already wrapped at fetch time
 
 	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
 	content := lipgloss.JoinVertical(lipgloss.Top, header, sep,
@@ -908,6 +1121,110 @@ func (m Model) mouseInBottomPane(y int) bool {
 	return absY >= topH
 }
 
+// logContentY returns the viewport-relative row for a screen y inside the
+// Logs pane, or -1 when the y is not over the content band.
+func (m Model) logContentY(y int) int {
+	contentH := m.height - tabBarHeight - helpBarHeight
+	topH := int(float64(contentH) * splitRatio)
+	return y - tabBarHeight - (topH + 5)
+}
+
+// logScreenToCell maps a screen (x, y) onto a buffer cell (row, rune
+// column). With clamp=true, off-body coordinates are snapped to the nearest
+// visible content cell so a drag released just outside the pane still
+// resolves as an edge selection; a value copy with clamp=false rejects
+// anything outside the log body.
+func (m Model) logScreenToCell(x, y int, clamp bool) (row, col int, ok bool) {
+	if m.width == 0 {
+		return 0, 0, false
+	}
+	if x < appMarginX || x >= m.width-appMarginX {
+		if !clamp {
+			return 0, 0, false
+		}
+		x = max(appMarginX, min(x, m.width-appMarginX-1))
+	}
+	x -= appMarginX
+	vw := innerW(m.width) - 1
+	if x < 0 || x >= vw {
+		if !clamp {
+			return 0, 0, false
+		}
+		x = max(0, min(x, vw-1))
+	}
+	vrow := m.logContentY(y)
+	if vrow < 0 || vrow >= m.containerLogViewport.Height {
+		if !clamp {
+			return 0, 0, false
+		}
+		vrow = max(0, min(vrow, m.containerLogViewport.Height-1))
+	}
+	lines := strings.Split(m.containerLogContent, "\n")
+	row = vrow + m.containerLogViewport.YOffset
+	if row < 0 || row >= len(lines) {
+		return 0, 0, false
+	}
+	n := len([]rune(lines[row]))
+	col = x
+	if col >= n {
+		col = n - 1
+	}
+	if col < 0 {
+		col = 0
+	}
+	return row, col, true
+}
+
+// finishLogSelection finalizes an in-flight drag: the endpoint snaps to the
+// nearest content cell and a click (no movement) leaves the selection
+// inactive so a plain click clears a previous highlight.
+func (m *Model) finishLogSelection(x, y int) {
+	m.dragSel = false
+	if r, c, ok := m.logScreenToCell(x, y, true); ok {
+		m.logSel.endR, m.logSel.endC = r, c
+	}
+	m.logSel.active = !m.logSel.isTrivial()
+}
+
+// reanchorSelection maps a selection anchored in oldContent onto newContent
+// by relocating the selected text. It returns the new selection and whether
+// the text is still present. Identical content (a redundant full reload)
+// keeps the selection untouched.
+func reanchorSelection(oldContent string, oldSel textSel, newContent string) (textSel, bool) {
+	if !oldSel.active {
+		return textSel{}, false
+	}
+	if newContent == oldContent {
+		return oldSel, true
+	}
+	text := selectedText(oldContent, oldSel)
+	if text == "" {
+		return textSel{}, false
+	}
+	start := strings.Index(newContent, text)
+	if start < 0 {
+		return textSel{}, false
+	}
+	end := start + len(text)
+	anR, anC := cellAt(newContent, len([]rune(newContent[:start])))
+	// logSel end columns are inclusive, so back up one rune off the end.
+	endR, endC := cellAt(newContent, len([]rune(newContent[:end]))-1)
+	return textSel{active: true, anR: anR, anC: anC, endR: endR, endC: endC}, true
+}
+
+// cellAt returns the (row, rune-column) inside content for a rune offset.
+// content is the pre-wrap, plain-text log buffer (no ANSI).
+func cellAt(content string, r int) (int, int) {
+	for i, line := range strings.Split(content, "\n") {
+		n := len([]rune(line))
+		if r <= n {
+			return i, r
+		}
+		r -= n + 1 // +1 for the separating newline
+	}
+	return 0, 0
+}
+
 func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
 	// Ignore clicks in the global horizontal margins and translate the
 	// x coordinate into the content area.
@@ -951,6 +1268,10 @@ func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
 				cum += w
 				if x < cum {
 					m.activeSubTab = subTab(i)
+					if i == int(subTabInfo) {
+						m.logSel = textSel{}
+						m.dragSel = false
+					}
 					if i == int(subTabLogs) {
 						return m, m.loadContainerLogs()
 					}
@@ -1337,6 +1658,8 @@ func (m *Model) switchTab(t tab) {
 	m.activeTab = t
 	m.selectedIdx = 0
 	m.mainYOff = 0
+	m.logSel = textSel{}
+	m.dragSel = false
 	m.fitViewports()
 }
 
@@ -1463,6 +1786,13 @@ func (m Model) loadContainerLogs() tea.Cmd {
 	}
 	c := m.containers[m.selectedIdx]
 	inc := m.logFetchPlan(c)
+	// While the user is actively selecting or dragging, never let a resync
+	// (stale cursor past logResyncGap) trigger a full tail reload mid-drag:
+	// that would re-wrap the buffer and destroy the in-flight selection.
+	// A since-based append is small because the pane re-fetches every tick.
+	if (m.logSel.active || m.dragSel) && !m.containerLogLastTS.IsZero() {
+		inc = true
+	}
 	return func() tea.Msg {
 		var reader io.ReadCloser
 		var err error

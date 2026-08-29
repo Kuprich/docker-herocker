@@ -401,6 +401,88 @@ func logMsg(m Model, content string, incremental bool) containerLogMsg {
 	return containerLogMsg{id: m.containers[m.selectedIdx].ID, content: content, incremental: incremental}
 }
 
+func TestLogSelectionSurvivesFollowTick(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.logFollow = true
+	m.containers = makeTestContainers(1)
+	m.containerLogViewport = viewport.New(80, 5)
+
+	// back at the bottom with a live selection in the middle of the buffer
+	first := testMouseUpdate(m, logMsg(m, strings.Repeat("line\n", 30), false))
+	if got := first.containerLogViewport.YOffset; got != 25 {
+		tt.Fatalf("initial YOffset = %d, want 25 (bottom)", got)
+	}
+	held := first
+	held.logSel = textSel{active: true, anR: 26, anC: 0, endR: 27, endC: 3}
+
+	// new lines arrive while the selection is active: follow must freeze
+	next := testMouseUpdate(held, logMsg(held, strings.Repeat("line\n", 10), true))
+	if !next.logSel.active || next.logSel.anR != 26 || next.logSel.endR != 27 {
+		tt.Errorf("selection damaged by incoming lines: %+v", next.logSel)
+	}
+	if got := next.containerLogViewport.YOffset; got != 25 {
+		tt.Errorf("YOffset with active selection = %d, want 25 (frozen, not 35)", got)
+	}
+
+	// clearing the selection lets follow chase the tail again
+	released := next
+	released.logSel = textSel{}
+	next2 := testMouseUpdate(released, logMsg(released, strings.Repeat("line\n", 10), true))
+	if got := next2.containerLogViewport.YOffset; got != 45 { // 50 lines - 5 height
+		tt.Errorf("follow after clear YOffset = %d, want 45 (bottom)", got)
+	}
+}
+
+func TestLogSelectionSurvivesFollowTickAtBottom(tt *testing.T) {
+	// checkbox off, but the user is reading at the bottom: AtBottom() alone
+	// must not shove a live selection off-screen either.
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.logFollow = false
+	m.containers = makeTestContainers(1)
+	m.containerLogViewport = viewport.New(80, 5)
+
+	first := testMouseUpdate(m, logMsg(m, strings.Repeat("line\n", 30), false))
+	if got := first.containerLogViewport.YOffset; got != 25 {
+		tt.Fatalf("initial YOffset = %d, want 25 (bottom)", got)
+	}
+	held := first
+	held.logSel = textSel{active: true, anR: 26, anC: 0, endR: 27, endC: 3}
+	next := testMouseUpdate(held, logMsg(held, strings.Repeat("line\n", 10), true))
+	if !next.logSel.active {
+		tt.Error("AtBottom-implied follow must respect an active selection")
+	}
+	if got := next.containerLogViewport.YOffset; got != 25 {
+		tt.Errorf("YOffset with active selection at bottom = %d, want 25", got)
+	}
+}
+
+func TestLogInFlightDragFreezesFollow(tt *testing.T) {
+	// an in-flight drag (no released selection yet) must not get yanked
+	// by an incoming log tick mid-motion.
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.logFollow = true
+	m.containers = makeTestContainers(1)
+	m.containerLogViewport = viewport.New(80, 5)
+
+	first := testMouseUpdate(m, logMsg(m, strings.Repeat("line\n", 30), false))
+	dragging := first
+	dragging.dragSel = true
+	dragging.logSel = textSel{anR: 26, anC: 0, endR: 27, endC: 3}
+	next := testMouseUpdate(dragging, logMsg(dragging, strings.Repeat("line\n", 10), true))
+	if got := next.containerLogViewport.YOffset; got != 25 {
+		tt.Errorf("YOffset during in-flight drag = %d, want 25 (frozen)", got)
+	}
+}
+
 func TestContainerLogMsgIncrementalAppends(tt *testing.T) {
 	id := "aaaaaaaaaaaa"
 	m := New(nil)
@@ -534,6 +616,52 @@ func TestFollowToggleClick(tt *testing.T) {
 	}
 }
 
+func TestMouseModifiersAreIgnored(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.activeTab = tabContainers
+	m.activeSubTab = subTabLogs
+	m.containers = makeTestContainers(5)
+	m.containerLogViewport.SetContent(strings.Repeat("log line\n", 50))
+	m.containerLogViewport.Height = 10
+	m.containerLogViewport.YOffset = 3
+	m.selectedIdx = 1
+
+	// Without the modifier this click would select table row 2.
+	shiftClick := tea.MouseMsg{
+		Type: tea.MouseLeft, X: appMarginX + 10, Y: tabBarHeight + 4, Shift: true,
+	}
+	next := testMouseUpdate(m, shiftClick)
+	if next.selectedIdx != 1 {
+		tt.Errorf("shift click changed selectedIdx to %d", next.selectedIdx)
+	}
+	if !next.logFollow {
+		tt.Error("shift click toggled logFollow")
+	}
+
+	// Without the modifier this drag would scroll the log viewport.
+	contentH := m.height - tabBarHeight - helpBarHeight
+	topH := int(float64(contentH) * splitRatio)
+	shiftDrag := tea.MouseMsg{
+		X: 50, Y: tabBarHeight + topH + 2, Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionMotion, Shift: true,
+	}
+	next = testMouseUpdate(next, shiftDrag)
+	if next.containerLogViewport.YOffset != 3 {
+		tt.Errorf("shift drag scrolled viewport to YOffset %d", next.containerLogViewport.YOffset)
+	}
+
+	ctrlClick := tea.MouseMsg{
+		Type: tea.MouseLeft, X: appMarginX + 10, Y: tabBarHeight + 4, Ctrl: true,
+	}
+	next = testMouseUpdate(next, ctrlClick)
+	if next.selectedIdx != 1 {
+		tt.Errorf("ctrl click changed selectedIdx to %d", next.selectedIdx)
+	}
+}
+
 func TestFollowCheckboxGlyph(tt *testing.T) {
 	on := New(nil)
 	on.logFollow = true
@@ -653,5 +781,394 @@ func TestBuildDetailContentNetworksNameColumn(tt *testing.T) {
 	}
 	if strings.Contains(stripANSI(out), "…") {
 		tt.Errorf("long network name got truncated at w=%d:\n%s", w, stripANSI(out))
+	}
+}
+
+// logTestModel returns a Model wired for Logs-pane selection tests: width 120,
+// height 30 (so the content band starts at screen y == tabBarHeight+topH+5)
+// with a 6-line buffer scrolled one row in.
+func logTestModel() Model {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.activeTab = tabContainers
+	m.activeSubTab = subTabLogs
+	m.containers = makeTestContainers(1)
+	m.logFollow = false
+	m.containerLogContent = "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta"
+	m.containerLogViewport.SetContent(m.containerLogContent)
+	m.containerLogViewport.Height = 5
+	m.containerLogViewport.YOffset = 1
+	return m
+}
+
+func TestTextSelRowSpan(tt *testing.T) {
+	// down-right drag across three rows
+	s := textSel{anR: 0, anC: 1, endR: 2, endC: 3}
+	if got, _, ok := s.rowSpan(0); !ok || got != 1 {
+		tt.Errorf("row 0 from = %d ok=%v, want 1 true", got, ok)
+	}
+	if got, to, ok := s.rowSpan(1); !ok || got != 0 || to != -1 {
+		tt.Errorf("row 1 span = (%d,%d) ok=%v, want (0,-1)", got, to, ok)
+	}
+	if got, to, ok := s.rowSpan(2); !ok || got != 0 || to != 3 {
+		tt.Errorf("row 2 span = (%d,%d) ok=%v, want (0,3)", got, to, ok)
+	}
+	if _, _, ok := s.rowSpan(3); ok {
+		tt.Error("row 3 should be outside the selection")
+	}
+	// up-right drag (anchor bottom, endpoint top)
+	s = textSel{anR: 2, anC: 3, endR: 0, endC: 1}
+	if got, _, ok := s.rowSpan(0); !ok || got != 1 {
+		tt.Errorf("up-drag row 0 from = %d ok=%v, want 1", got, ok)
+	}
+	if got, to, ok := s.rowSpan(2); !ok || got != 0 || to != 3 {
+		tt.Errorf("up-drag row 2 span = (%d,%d), want (0,3)", got, to)
+	}
+	// single-row drag in each direction
+	s = textSel{anR: 1, anC: 5, endR: 1, endC: 2}
+	if from, to, ok := s.rowSpan(1); !ok || from != 2 || to != 5 {
+		tt.Errorf("leftward single-row span = (%d,%d) ok=%v, want (2,5)", from, to, ok)
+	}
+}
+
+func TestTextSelIsTrivial(tt *testing.T) {
+	if !(textSel{anR: 1, anC: 2, endR: 1, endC: 2}).isTrivial() {
+		tt.Error("same-cell selection should be trivial (a click)")
+	}
+	if (textSel{anR: 1, anC: 2, endR: 1, endC: 3}).isTrivial() {
+		tt.Error("two-cell selection should not be trivial")
+	}
+}
+
+func withTrueColor(t *testing.T, f func()) {
+	t.Helper()
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(prev)
+	f()
+}
+
+func TestDecorateSelectionSpansRows(tt *testing.T) {
+	withTrueColor(tt, func() {
+		content := "aaaa\nbbbb\ncccc"
+		sel := textSel{active: true, anR: 0, anC: 1, endR: 2, endC: 2}
+		out := decorateSelection(content, sel)
+
+		if plain := stripANSI(out); plain != content {
+			tt.Errorf("decorate changed visible text:\n got %q\nwant %q", plain, content)
+		}
+		lines := strings.Split(out, "\n")
+		for i, want := range map[int]int{0: 1, 1: 1, 2: 1} {
+			if n := strings.Count(lines[i], "48;2;44;73;46"); n != want {
+				tt.Errorf("row %d has %d selection-highlight SGRs, want %d:\n%s", i, n, want, lines[i])
+			}
+		}
+		// the first row keeps its unselected prefix
+		first := stripANSI(lines[0])
+		if !strings.HasPrefix(first, "a") || !strings.Contains(first, "aaaa") {
+			tt.Errorf("row 0 should keep prefix then highlight: %q", first)
+		}
+	})
+}
+
+func TestDecorateSelectionStyledRowFallsBackWholeLine(tt *testing.T) {
+	withTrueColor(tt, func() {
+		styled := "\x1b[36m" + "Title" + "\x1b[0m"
+		content := "plain\n" + styled
+		sel := textSel{active: true, anR: 0, anC: 0, endR: 1, endC: 1}
+		out := decorateSelection(content, sel)
+		lines := strings.Split(out, "\n")
+		if plain := stripANSI(lines[1]); plain != "Title" {
+			tt.Errorf("styled row = %q, want stripped %q", plain, "Title")
+		}
+		if !strings.Contains(lines[1], "48;2;44;73;46") {
+			tt.Errorf("styled row should be highlighted, got: %q", lines[1])
+		}
+		if strings.Contains(out, "\x1b[36m\x1b[48") && strings.Count(lines[1], "Title") != 2 {
+			tt.Errorf("styled row must not double-apply styles: %q", lines[1])
+		}
+	})
+}
+
+func TestSelectedText(tt *testing.T) {
+	content := "abc\ndef\nghij"
+	sel := textSel{active: true, anR: 0, anC: 0, endR: 2, endC: 1}
+	if got := selectedText(content, sel); got != "abc\ndef\ngh" {
+		tt.Errorf("selectedText = %q, want %q", got, "abc\ndef\ngh")
+	}
+	// ansi row is stripped before slicing
+	styled := "\x1b[32m" + "XY" + "\x1b[0m"
+	sel = textSel{active: true, anR: 0, anC: 0, endR: 0, endC: 1}
+	if got := selectedText(styled, sel); got != "XY" {
+		tt.Errorf("styled selectedText = %q, want %q", got, "XY")
+	}
+	if got := selectedText(content, textSel{}); got != "" {
+		tt.Errorf("inactive selection should yield empty text, got %q", got)
+	}
+}
+
+func TestLogDragSelectsAcrossRows(tt *testing.T) {
+	m := logTestModel()
+	// viewport row 0 == buffer row 1 (YOffset=1), content band starts at y=21
+	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21}
+	_ = press
+	next := testMouseUpdate(m, press)
+	if !next.dragSel {
+		tt.Fatal("left press in the log body should start a drag")
+	}
+	if next.logSel.anR != 1 || next.logSel.anC != 0 {
+		tt.Errorf("anchor = (%d,%d), want buffer (1,0)", next.logSel.anR, next.logSel.anC)
+	}
+
+	motion := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 23}
+	next = testMouseUpdate(next, motion)
+	if next.logSel.endR != 3 || next.logSel.endC != 3 {
+		tt.Errorf("end = (%d,%d), want (3,3)", next.logSel.endR, next.logSel.endC)
+	}
+
+	release := tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 4, Y: 23}
+	next = testMouseUpdate(next, release)
+	if next.dragSel {
+		tt.Error("release should end the drag")
+	}
+	if !next.logSel.active {
+		tt.Error("drag should finalize an active selection")
+	}
+	want := "beta\ngamma\ndelt"
+	if got := selectedText(next.containerLogContent, next.logSel); got != want {
+		tt.Errorf("selectedText = %q, want %q", got, want)
+	}
+}
+
+func TestLogClickClearsSelection(tt *testing.T) {
+	m := logTestModel()
+	m.logSel = textSel{active: true, anR: 0, anC: 0, endR: 4, endC: 3}
+
+	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 22}
+	next := testMouseUpdate(m, press)
+	if !next.dragSel {
+		tt.Fatal("press should start a fresh drag")
+	}
+	release := tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 1, Y: 22}
+	next = testMouseUpdate(next, release)
+	if next.dragSel {
+		tt.Error("release should end the drag")
+	}
+	if next.logSel.active {
+		tt.Error("a click (no drag) should clear the previous selection")
+	}
+}
+
+func TestLogSelectionEscClears(tt *testing.T) {
+	m := logTestModel()
+	m.logSel = textSel{active: true, anR: 0, anC: 0, endR: 4, endC: 3}
+	next := testMouseUpdate(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if next.logSel.active {
+		tt.Error("esc should clear the selection")
+	}
+	if next.activeSubTab != subTabLogs {
+		tt.Error("esc must not switch sub-tab while a selection is active")
+	}
+	// a second esc with no selection still falls back to switching to Info
+	next2 := testMouseUpdate(next, tea.KeyMsg{Type: tea.KeyEsc})
+	if next2.activeSubTab != subTabInfo {
+		tt.Error("esc without selection should switch back to Info")
+	}
+}
+
+func TestLogSelectionLeavingTabClearsKey(tt *testing.T) {
+	m := logTestModel()
+	m.logSel = textSel{active: true, anR: 0, anC: 0, endR: 4, endC: 3}
+	next := testMouseUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("left")})
+	if next.activeSubTab != subTabInfo {
+		tt.Error("left arrow should switch to Info")
+	}
+	if next.logSel.active {
+		tt.Error("leaving the Logs tab should clear the selection")
+	}
+}
+
+func TestLogSelectionClearedWhenTextGoneOnFullReplace(tt *testing.T) {
+	m := logTestModel()
+	m.logSel = textSel{active: true, anR: 0, anC: 0, endR: 4, endC: 3}
+	m.dragSel = true
+	next := testMouseUpdate(m, containerLogMsg{id: m.containers[m.selectedIdx].ID, content: "fresh\nline"})
+	if next.logSel.active || next.dragSel {
+		tt.Error("full replace without the selected text should clear selection state")
+	}
+}
+
+func TestLogSelectionKeptOnIdenticalFullReplace(tt *testing.T) {
+	m := logTestModel()
+	m.logSel = textSel{active: true, anR: 0, anC: 0, endR: 3, endC: 3}
+	next := testMouseUpdate(m, containerLogMsg{id: m.containers[m.selectedIdx].ID, content: "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta"})
+	if !next.logSel.active {
+		tt.Fatal("identical full reload must keep the selection active")
+	}
+	if next.logSel.anR != 0 || next.logSel.anC != 0 || next.logSel.endR != 3 || next.logSel.endC != 3 {
+		tt.Errorf("selection drifted: %+v", next.logSel)
+	}
+}
+
+func TestLogSelectionReanchoredAfterFullReplace(tt *testing.T) {
+	m := logTestModel()
+	// select "beta\ngamma\ndelt" (rows 1..3, cols 0..3)
+	m.logSel = textSel{active: true, anR: 1, anC: 0, endR: 3, endC: 3}
+
+	// a full reload that still contains the selected text (quiet container
+	// re-issuing the same tail after a resync) must re-anchor, not clear
+	content := "prelude\nalpha\nbeta\ngamma\ndelta\nepsilon\nzeta\ntail"
+	next := testMouseUpdate(m, containerLogMsg{id: m.containers[m.selectedIdx].ID, content: content})
+	if !next.logSel.active {
+		tt.Fatal("full replace with matching text should keep the selection")
+	}
+	want := "beta\ngamma\ndelt"
+	if got := selectedText(next.containerLogContent, next.logSel); got != want {
+		tt.Errorf("re-anchored selectedText = %q, want %q", got, want)
+	}
+	// "beta" lands at row 2, "delt" ends at row 4 col 3 (inclusive)
+	if next.logSel.anR != 2 || next.logSel.anC != 0 || next.logSel.endR != 4 || next.logSel.endC != 3 {
+		tt.Errorf("re-anchored bounds = (%d,%d)-(%d,%d), want (2,0)-(4,3)",
+			next.logSel.anR, next.logSel.anC, next.logSel.endR, next.logSel.endC)
+	}
+	// decoration renders the highlight on the shifted rows
+	dec := decorateSelection(next.containerLogContent, next.logSel)
+	for _, wantLine := range []string{"beta", "gamma", "delt"} {
+		found := strings.Contains(dec, selTextStyle.Render(wantLine))
+		if !found {
+			tt.Errorf("decorated content missing highlighted %q", wantLine)
+		}
+	}
+}
+
+func TestLogSlowDragSurvivesIdenticalReload(tt *testing.T) {
+	// A quiet container gets a byte-identical full reload on every tick once
+	// its cursor goes stale. A slow drag that has a tick land mid-drag must
+	// not be destroyed by that reload.
+	m := logTestModel()
+	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21}
+	next := testMouseUpdate(m, press)
+	if !next.dragSel {
+		tt.Fatal("press should start a drag")
+	}
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 22})
+	if next.logSel.endR != 2 {
+		tt.Fatalf("motion end row = %d, want 2", next.logSel.endR)
+	}
+
+	// identical full reload lands in the middle of the drag
+	reload := containerLogMsg{id: next.containers[next.selectedIdx].ID, content: "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta"}
+	next = testMouseUpdate(next, reload)
+	if !next.dragSel || next.logSel.active {
+		tt.Fatalf("identical reload destroyed the in-flight drag: dragSel=%v sel=%+v", next.dragSel, next.logSel)
+	}
+	if next.logSel.anR != 1 || next.logSel.anC != 0 || next.logSel.endR != 2 || next.logSel.endC != 3 {
+		tt.Errorf("drag bounds after identical reload = (%d,%d)-(%d,%d), want (1,0)-(2,3)",
+			next.logSel.anR, next.logSel.anC, next.logSel.endR, next.logSel.endC)
+	}
+
+	// continued motion after the tick must still extend the drag
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 23})
+	if next.logSel.endR != 3 {
+		tt.Errorf("motion after tick end row = %d, want 3", next.logSel.endR)
+	}
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 4, Y: 23})
+	if !next.logSel.active {
+		tt.Error("release after a surviving drag should finalize an active selection")
+	}
+	if want := "beta\ngamma\ndelt"; selectedText(next.containerLogContent, next.logSel) != want {
+		tt.Errorf("selectedText = %q, want %q", selectedText(next.containerLogContent, next.logSel), want)
+	}
+}
+
+func TestLogInFlightDragDroppedOnChangedReload(tt *testing.T) {
+	// A genuinely different full reload (container recreated, log rotated)
+	// mid-drag cancels the drag: the old rows no longer exist.
+	m := logTestModel()
+	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21}
+	next := testMouseUpdate(m, press)
+	if !next.dragSel {
+		tt.Fatal("press should start a drag")
+	}
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 23})
+	next = testMouseUpdate(next, containerLogMsg{id: next.containers[next.selectedIdx].ID, content: "totally\ndifferent\nlog"})
+	if next.dragSel || next.logSel.active {
+		tt.Error("changed full reload should cancel the in-flight drag")
+	}
+}
+
+func TestLogSelectionReanchorCellBoundaries(tt *testing.T) {
+	sels, ok := reanchorSelection("a\nbcde", textSel{active: true, anR: 1, anC: 1, endR: 1, endC: 3}, "x\na\nbcde")
+	if !ok {
+		tt.Fatal("expected re-anchoring to succeed")
+	}
+	if sels.anR != 2 || sels.anC != 1 || sels.endR != 2 || sels.endC != 3 {
+		tt.Errorf("mid-line re-anchor = (%d,%d)-(%d,%d), want (2,1)-(2,3)", sels.anR, sels.anC, sels.endR, sels.endC)
+	}
+	// full-line selection "bcde" (cols 0..3 inclusive), shifted down two rows
+	sels, ok = reanchorSelection("a\nbcde", textSel{active: true, anR: 1, anC: 0, endR: 1, endC: 3}, "y\na\nbcde")
+	if !ok {
+		tt.Fatal("expected full-line re-anchoring to succeed")
+	}
+	if sels.anR != 2 || sels.anC != 0 || sels.endR != 2 || sels.endC != 3 {
+		tt.Errorf("full-line re-anchor = (%d,%d)-(%d,%d), want (2,0)-(2,3)", sels.anR, sels.anC, sels.endR, sels.endC)
+	}
+	// a single-cell selection that matches the first row of the new buffer
+	sels, ok = reanchorSelection("xy", textSel{active: true, anR: 0, anC: 0, endR: 0, endC: 0}, "x\nxyz")
+	if !ok {
+		tt.Fatal("expected cross-boundary re-anchoring to succeed")
+	}
+	if got := selectedText("x\nxyz", sels); got != "x" {
+		tt.Errorf("cross-boundary selectedText = %q, want %q", got, "x")
+	}
+}
+
+func TestLogSelectionClearedOnPrune(tt *testing.T) {
+	m := logTestModel()
+	filler := strings.Repeat("x\n", 2*logMaxWrappedLines+1)
+	m.containerLogContent = filler
+	m.logSel = textSel{active: true, anR: 0, anC: 0, endR: 4, endC: 3}
+	msg := containerLogMsg{id: m.containers[m.selectedIdx].ID, content: strings.Repeat("y\n", 200), incremental: true}
+	next := testMouseUpdate(m, msg)
+	if next.logSel.active {
+		tt.Error("pruning the log buffer should clear buffer-anchored selection")
+	}
+}
+
+func TestWheelStillScrollsLogsWithSelection(tt *testing.T) {
+	m := logTestModel()
+	m.logSel = textSel{active: true, anR: 0, anC: 0, endR: 4, endC: 3}
+	m.containerLogViewport.SetContent(strings.Repeat("filler line\n", 30))
+	m.containerLogViewport.YOffset = 1
+
+	wheel := tea.MouseMsg{Type: tea.MouseWheelDown, Action: tea.MouseActionPress,
+		Button: tea.MouseButtonWheelDown, X: 20, Y: 25}
+	next := testMouseUpdate(m, wheel)
+	if next.containerLogViewport.YOffset <= 1 {
+		tt.Error("wheel down should scroll the log viewport even with a selection active")
+	}
+	if !next.logSel.active {
+		tt.Error("wheel scroll must not clear the selection")
+	}
+}
+
+func TestLogSelectionSurvivesScroll(tt *testing.T) {
+	m := logTestModel()
+	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21}
+	motion := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 23}
+	release := tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 4, Y: 23}
+	m = testMouseUpdate(testMouseUpdate(testMouseUpdate(m, press), motion), release)
+	if want := "beta\ngamma\ndelt"; selectedText(m.containerLogContent, m.logSel) != want {
+		tt.Fatalf("pre-scroll selectedText = %q, want %q", selectedText(m.containerLogContent, m.logSel), want)
+	}
+
+	m.containerLogViewport.SetContent(strings.Repeat("filler\n", 30))
+	m.containerLogViewport.YOffset = 10
+	// selection rows are buffer-anchored, not screen-anchored, so the
+	// selected text is unchanged even though the view moved
+	if got := selectedText(m.containerLogContent, m.logSel); got != "beta\ngamma\ndelt" {
+		tt.Errorf("post-scroll selectedText = %q, want %q (selection drifted)", got, "beta\ngamma\ndelt")
 	}
 }

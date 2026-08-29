@@ -155,6 +155,141 @@ def wheel_over_table_moves_selection(s):
 
 
 @check
+def shift_drag_is_ignored_selection_unchanged(s):
+    s.drain(3.0)
+    # open the Logs sub-tab so there is a scrollable bottom pane
+    s.send(b"\x1b[<0;12;18M"); time.sleep(0.05)
+    s.send(b"\x1b[<0;12;18m")
+    s.drain(0.8)
+
+    sel_bg = "\x1b[48;2;44;73;46"
+
+    def sel_count():
+        txt = s.allbuf.decode("utf-8", "replace")
+        i = txt.find("t1_test-stub-1")
+        assert i != -1, "first container line not found"
+        return txt[i - 400:i + 40].count(sel_bg)
+
+    before = sel_count()
+    assert before > 0, "expected first container row to be selected"
+    # shift+left press/release over a lower table row (would select another container)
+    s.send(b"\x1b[<4;20;12M"); time.sleep(0.05)
+    s.send(b"\x1b[<4;20;12m")
+    # shift+drag motions inside the log pane + release
+    s.send(b"\x1b[<36;60;20M"); time.sleep(0.05)
+    s.send(b"\x1b[<36;80;20M"); time.sleep(0.05)
+    s.send(b"\x1b[<36;80;20m")
+    s.drain(0.7)
+    after = sel_count()
+    assert after == before, \
+        f"shift events changed selection highlight (before={before}, after={after})"
+
+
+@check
+def left_drag_selects_log_text(s):
+    s.drain(3.0)
+    # open the Logs sub-tab so the log body is underneath the cursor
+    s.send(b"\x1b[<0;12;18M"); time.sleep(0.05)
+    s.send(b"\x1b[<0;12;18m")
+    s.drain(1.0)
+
+    sel_bg = "48;2;44;73;46"   # selection green, same color as the table highlight
+
+    def count_sel():
+        return s.allbuf.decode("utf-8", "replace").count(sel_bg)
+
+    base = len(s.allbuf)
+    before = count_sel()
+    assert before > 0, "expected the container-table selection highlight"
+
+    # left-drag over the Logs content band (screen rows 21..26 -> SGR y 22..27)
+    s.send(b"\x1b[<0;15;22M"); time.sleep(0.05)   # press
+    s.send(b"\x1b[<32;30;23M"); time.sleep(0.05)  # left-motion
+    s.send(b"\x1b[<32;70;26M"); time.sleep(0.05)  # left-motion
+    s.send(b"\x1b[<0;70;26m")                     # release
+    s.drain(0.8)
+    assert count_sel() > before, \
+        f"left-drag did not highlight log text (before={before}, after={count_sel()})"
+
+    # a plain click (no motion) clears the highlight. The press itself emits
+    # a one-cell live-preview frame before the release clears it, so settle
+    # that transient first, then force a plain repaint (wheel) and check that
+    # the freshly emitted log band carries no highlight.
+    s.send(b"\x1b[<0;15;22M"); time.sleep(0.05)
+    s.send(b"\x1b[<0;15;22m")
+    s.drain(0.8)                             # settle the transient preview frame
+    mark = len(s.allbuf)
+    s.send(b"\x1b[<64;15;22M"); time.sleep(0.05)   # wheel-up over the log body
+    s.drain(0.8)
+    tail = s.allbuf[mark:].decode("utf-8", "replace")
+    assert sel_bg not in tail, \
+        "click did not clear the log text highlight (still in new output)"
+
+
+@check
+def selection_survives_log_refresh(s):
+    s.drain(3.0)
+    # open the Logs sub-tab so the log body is underneath the cursor
+    s.send(b"\x1b[<0;12;18M"); time.sleep(0.05)
+    s.send(b"\x1b[<0;12;18m")
+    s.drain(1.0)
+
+    sel_bg = "48;2;44;73;46"
+
+    # drag a selection over the log body
+    s.send(b"\x1b[<0;15;22M"); time.sleep(0.05)   # press
+    s.send(b"\x1b[<32;40;24M"); time.sleep(0.05)  # left-motion
+    s.send(b"\x1b[<0;40;24m")                     # release
+    s.drain(0.6)
+    assert sel_bg in s.allbuf.decode("utf-8", "replace"), \
+        "drag did not highlight log text"
+
+    # wait through several 500ms log-refresh ticks: the visible position must
+    # stay frozen (no follow/AtBottom snap) so the highlight cannot scroll off
+    s.drain(1.2)
+
+    # force a repaint of the log band via a wheel event; the freshly emitted
+    # rows must still carry the selection highlight
+    mark = len(s.allbuf)
+    s.send(b"\x1b[<64;15;22M"); time.sleep(0.05)   # wheel-up over the log body
+    s.drain(0.8)
+    tail = s.allbuf[mark:].decode("utf-8", "replace")
+    assert sel_bg in tail, \
+        "selection highlight lost after log refresh ticks (follow snapped it off-screen)"
+
+
+@check
+def slow_drag_survives_log_refresh(s):
+    s.drain(3.0)
+    # open the Logs sub-tab so the log body is underneath the cursor
+    s.send(b"\x1b[<0;12;18M"); time.sleep(0.05)
+    s.send(b"\x1b[<0;12;18m")
+    s.drain(1.0)
+
+    sel_bg = "48;2;44;73;46"
+
+    # A slow drag: a ~0.9s pause mid-drag lets at least one 500ms log-refresh
+    # tick (a full identical reload for a quiet container) land while the
+    # button is still held. That reload must not destroy the in-flight drag.
+    s.send(b"\x1b[<0;15;22M"); time.sleep(0.05)   # press
+    s.send(b"\x1b[<32;30;23M"); time.sleep(0.05)  # motion
+    time.sleep(0.9)                               # slow movement -> tick lands
+    s.send(b"\x1b[<32;50;24M"); time.sleep(0.05)  # motion continues
+    s.send(b"\x1b[<32;60;25M"); time.sleep(0.05)  # motion continues
+    s.send(b"\x1b[<0;60;25m")                     # release
+    s.drain(0.8)
+
+    # force a repaint of the log band; the freshly emitted rows must carry the
+    # highlight even after the mid-drag refresh tick
+    mark = len(s.allbuf)
+    s.send(b"\x1b[<64;60;25M"); time.sleep(0.05)   # wheel-over the log body
+    s.drain(0.8)
+    tail = s.allbuf[mark:].decode("utf-8", "replace")
+    assert sel_bg in tail, \
+        "slow drag lost the selection when a log-refresh tick landed mid-drag"
+
+
+@check
 def narrow_terminal_no_panic(s):
     # reuse current session with a resize instead of a second spawn
     winsize = struct.pack("HHHH", 20, 100, 0, 0)

@@ -16,6 +16,7 @@ type keyMap struct {
 	Two       key.Binding
 	Three     key.Binding
 	Four      key.Binding
+	Select    key.Binding
 }
 
 var keys = keyMap{
@@ -71,6 +72,10 @@ var keys = keyMap{
 		key.WithKeys("4"),
 		key.WithHelp("4", "networks"),
 	),
+	Select: key.NewBinding(
+		key.WithKeys(""),
+		key.WithHelp("Shift+drag", "native text selection"),
+	),
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
@@ -79,7 +84,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.Up, k.Down, k.Follow},
+		{k.Up, k.Down, k.Follow, k.Select},
 		{k.StartStop, k.Restart, k.ToggleAll},
 		{k.Back, k.Help, k.Quit},
 	}
