@@ -7,7 +7,7 @@ ANSI artifacts. Requires a running Docker daemon for meaningful data.
 
 Usage: python3 scripts/e2e.py [--cols N --rows N]
 """
-import os, pty, time, select, fcntl, termios, struct, re, sys
+import base64, os, pty, time, select, fcntl, termios, struct, re, sys
 
 COLS, ROWS = 140, 30
 THEME_BG_RGB = "13;17;23"      # #0d1117
@@ -224,6 +224,46 @@ def left_drag_selects_log_text(s):
     tail = s.allbuf[mark:].decode("utf-8", "replace")
     assert sel_bg not in tail, \
         "click did not clear the log text highlight (still in new output)"
+
+
+@check
+def drag_copies_selection_via_osc52(s):
+    s.drain(3.0)
+    s.send(b"\x1b[<0;12;18M"); time.sleep(0.05)
+    s.send(b"\x1b[<0;12;18m")
+    s.drain(1.0)
+
+    osc52_re = re.compile(rb"\x1b]52;c;([A-Za-z0-9+/=]+)\x1b\\")
+
+    def payloads():
+        return [base64.b64decode(g) for g in osc52_re.findall(s.allbuf)]
+
+    before = len(payloads())
+
+    # drag + release over the log body -> auto-copy to the clipboard
+    s.send(b"\x1b[<0;15;22M"); time.sleep(0.05)
+    s.send(b"\x1b[<32;30;23M"); time.sleep(0.05)
+    s.send(b"\x1b[<32;70;26M"); time.sleep(0.05)
+    s.send(b"\x1b[<0;70;26m")
+    s.drain(0.8)
+    auto = payloads()
+    assert len(auto) > before, "drag release did not emit an OSC 52 copy"
+    assert b"\n" in auto[-1], "selected text should span at least two lines"
+
+    # `y` re-copies the still-active selection
+    s.send(b"y"); time.sleep(0.05)
+    s.drain(0.8)
+    recopy = payloads()
+    assert len(recopy) > len(auto), "y did not re-copy the selection"
+    assert recopy[-1] == auto[-1], "y re-copy payload differs from the drag copy"
+
+    # a plain click clears the selection; y must then be a no-op
+    s.send(b"\x1b[<0;15;22M"); time.sleep(0.05)
+    s.send(b"\x1b[<0;15;22m"); s.drain(0.8)
+    cnt = len(payloads())
+    s.send(b"y"); time.sleep(0.05)
+    s.drain(0.8)
+    assert len(payloads()) == cnt, "y copied with no active selection"
 
 
 @check

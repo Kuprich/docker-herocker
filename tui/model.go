@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -243,6 +245,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logFollow = !m.logFollow
 			}
 			return m, nil
+		case key.Matches(msg, keys.Copy):
+			if m.activeTab == tabContainers && m.activeSubTab == subTabLogs && m.logSel.active {
+				return m, osc52Copy(m.selectionText())
+			}
 		case key.Matches(msg, keys.Back):
 			if m.activeTab == tabContainers && m.activeSubTab == subTabLogs {
 				if m.logSel.active || m.dragSel {
@@ -427,7 +433,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.logSel.endR, m.logSel.endC = r, c
 						}
 					case up:
-						m.finishLogSelection(msg.X, msg.Y)
+						return m, m.finishLogSelection(msg.X, msg.Y)
 					}
 					return m, nil
 				}
@@ -514,7 +520,7 @@ func (m Model) renderHelpBar() string {
 	if m.helpOn {
 		return HelpBarStyle.Width(cw).Render(m.help.View(keys))
 	}
-	h := " 1-4  tabs  •  ↑/↓  navigate  •  ←/→  Info/Logs  •  Space  start/stop  •  r  restart  •  a  all  •  ?  help  •  Shift+drag  select"
+	h := " 1-4  tabs  •  ↑/↓  navigate  •  ←/→  Info/Logs  •  Space  start/stop  •  r  restart  •  a  all  •  y  copy  •  ?  help  •  Shift+drag  select"
 	return HelpBarStyle.Width(cw).Render(h)
 }
 
@@ -1177,13 +1183,42 @@ func (m Model) logScreenToCell(x, y int, clamp bool) (row, col int, ok bool) {
 
 // finishLogSelection finalizes an in-flight drag: the endpoint snaps to the
 // nearest content cell and a click (no movement) leaves the selection
-// inactive so a plain click clears a previous highlight.
-func (m *Model) finishLogSelection(x, y int) {
+// inactive so a plain click clears a previous highlight. A non-trivial drag
+// auto-copies the selected text to the host clipboard via OSC 52.
+func (m *Model) finishLogSelection(x, y int) tea.Cmd {
 	m.dragSel = false
 	if r, c, ok := m.logScreenToCell(x, y, true); ok {
 		m.logSel.endR, m.logSel.endC = r, c
 	}
 	m.logSel.active = !m.logSel.isTrivial()
+	if m.logSel.active {
+		return osc52Copy(m.selectionText())
+	}
+	return nil
+}
+
+// selectionText returns the plain (ANSI-stripped) text currently selected in
+// the Logs pane.
+func (m Model) selectionText() string {
+	return selectedText(m.containerLogContent, m.logSel)
+}
+
+// osc52Copy returns a Cmd that writes payload to the terminal clipboard using
+// the OSC 52 escape sequence. The app runs in the alternate screen where
+// tea.Println/tea.Printf suppress output, so the sequence is written straight
+// to the terminal; it only updates the host clipboard and paints nothing.
+func osc52Copy(payload string) tea.Cmd {
+	return func() tea.Msg {
+		fmt.Fprint(os.Stdout, osc52Sequence(payload))
+		return nil
+	}
+}
+
+// osc52Sequence builds the raw OSC 52 clipboard-write escape sequence for
+// payload: 52 is the clipboard pseudo-function, c the selection clipboard.
+func osc52Sequence(payload string) string {
+	b64 := base64.StdEncoding.EncodeToString([]byte(payload))
+	return "\x1b]52;c;" + b64 + "\x1b\\"
 }
 
 // reanchorSelection maps a selection anchored in oldContent onto newContent

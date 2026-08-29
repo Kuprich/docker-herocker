@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/base64"
 	"fmt"
 	"regexp"
 	"strings"
@@ -1096,6 +1097,62 @@ func TestLogInFlightDragDroppedOnChangedReload(tt *testing.T) {
 	next = testMouseUpdate(next, containerLogMsg{id: next.containers[next.selectedIdx].ID, content: "totally\ndifferent\nlog"})
 	if next.dragSel || next.logSel.active {
 		tt.Error("changed full reload should cancel the in-flight drag")
+	}
+}
+
+func testUpdate(m Model, msg tea.Msg) (Model, tea.Cmd) {
+	next, cmd := m.Update(msg)
+	return next.(Model), cmd
+}
+
+func TestOsc52Sequence(tt *testing.T) {
+	b64 := base64.StdEncoding.EncodeToString([]byte("beta\nx"))
+	if want := "\x1b]52;c;" + b64 + "\x1b\\"; osc52Sequence("beta\nx") != want {
+		tt.Errorf("sequence = %q, want %q", osc52Sequence("beta\nx"), want)
+	}
+	rus := "выделение"
+	if got := osc52Sequence(rus); got != "\x1b]52;c;"+base64.StdEncoding.EncodeToString([]byte(rus))+"\x1b\\" {
+		tt.Error("non-ASCII text should be UTF-8 base64 encoded")
+	}
+}
+
+func TestLogReleaseAutoCopiesSelection(tt *testing.T) {
+	m := logTestModel()
+	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21})
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 23})
+	next, cmd := testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 4, Y: 23})
+	if !next.logSel.active {
+		tt.Fatal("release of a real drag should finalize an active selection")
+	}
+	if cmd == nil {
+		tt.Error("non-trivial release should return an OSC 52 copy command")
+	}
+	// a plain click (release on the same cell) must not auto-copy
+	next = testMouseUpdate(logTestModel(), tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21})
+	next, cmd = testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 1, Y: 21})
+	if next.logSel.active {
+		tt.Fatal("plain click must not finalize an active selection")
+	}
+	if cmd != nil {
+		tt.Error("plain click should not copy to the clipboard")
+	}
+}
+
+func TestCopyKeyRecopiesSelection(tt *testing.T) {
+	m := logTestModel()
+	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21})
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 22})
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 4, Y: 22})
+	if !next.logSel.active {
+		tt.Fatal("expected an active selection before re-copy")
+	}
+	keyY := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")}
+	if _, cmd := testUpdate(next, keyY); cmd == nil {
+		tt.Error("y with an active selection should return a copy command")
+	}
+	next.logSel = textSel{}
+	if _, cmd := testUpdate(next, keyY); cmd != nil {
+		tt.Error("y without a selection should return no command")
 	}
 }
 
