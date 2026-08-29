@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/kuri4/dockerherocker/docker"
+	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
 )
 
@@ -993,6 +994,77 @@ func TestSelectedText(tt *testing.T) {
 	if got := selectedText(content, textSel{}); got != "" {
 		tt.Errorf("inactive selection should yield empty text, got %q", got)
 	}
+}
+
+func TestWrapLogCellsStripsAnsiAndCrLf(tt *testing.T) {
+	in := "\x1b[31mred\x1b[0m one\r\n\x1b[32mgreen\x1b[0m two\r\n"
+	got := wrapLogCells(in, 80)
+	if want := "red one\ngreen two"; got != want {
+		tt.Errorf("wrapLogCells = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "\x1b") || strings.Contains(got, "\r") {
+		tt.Errorf("wrapLogCells kept ANSI/CR: %q", got)
+	}
+}
+
+func TestWrapLogCellsPlainASCIIIdentical(tt *testing.T) {
+	// For plain single-cell text the cell-space wrap must behave exactly like
+	// the previous rune-space wrap, so existing selection geometry holds.
+	in := "aaa\naaattt\n\nttt"
+	if got, want := wrapLogCells(in, 3), "aaa\naaa\nttt\n\nttt"; got != want {
+		tt.Errorf("wrapLogCells = %q, want %q", got, want)
+	}
+}
+
+func TestWrapLogCellsWideRunesNoSplit(tt *testing.T) {
+	content := "中文測試abcdefgh"
+	out := wrapLogCells(content, 6)
+	for i, line := range strings.Split(out, "\n") {
+		if cellw := runewidth.StringWidth(line); cellw > 6 {
+			tt.Errorf("row %d exceeds 6 cells: %q (%d)", i, line, cellw)
+		}
+	}
+	if joined := strings.Join(strings.Split(out, "\n"), ""); joined != content {
+		tt.Errorf("wrap dropped runes: %q, want %q", joined, content)
+	}
+}
+
+func TestCellToRuneColumnWideRow(tt *testing.T) {
+	line := "ab中cd" // cells: a(1) b(1) 中(2) c(1) d(1) = 6
+	for x, want := range map[int]int{0: 0, 1: 1, 2: 2, 3: 2, 4: 3, 5: 4, 6: 4, 10: 4} {
+		col, ok := cellToRuneColumn(line, x)
+		if !ok || col != want {
+			tt.Errorf("cellToRuneColumn(%q, %d) = (%d,%v), want %d", line, x, col, ok, want)
+		}
+	}
+}
+
+func TestStyleLogRowsPaintsThemeEverywhere(tt *testing.T) {
+	withTrueColor(tt, func() {
+		sel := textSel{active: true, anR: 0, anC: 1, endR: 0, endC: 2}
+		out := styleLogRows("aaa\nbbb", sel, 6, 4)
+		lines := strings.Split(out, "\n")
+		if len(lines) != 4 {
+			tt.Fatalf("styleLogRows rows = %d, want 4", len(lines))
+		}
+		for i, ln := range lines {
+			if cellw := runewidth.StringWidth(stripANSI(ln)); cellw != 6 {
+				tt.Errorf("row %d rendered width = %d, want 6: %q", i, cellw, ln)
+			}
+			if !strings.Contains(ln, "48;2;13;17;23") {
+				tt.Errorf("row %d missing theme background: %q", i, ln)
+			}
+		}
+		if trimmed := strings.TrimRight(stripANSI(lines[0]), " "); trimmed != "aaa" {
+			tt.Errorf("row 0 text = %q, want %q", trimmed, "aaa")
+		}
+		if strings.Count(lines[0], "48;2;44;73;46") != 1 {
+			tt.Errorf("row 0 should carry exactly one selection highlight: %q", lines[0])
+		}
+		if trimmed := strings.TrimRight(stripANSI(lines[1]), " "); trimmed != "bbb" {
+			tt.Errorf("row 1 text = %q, want %q", trimmed, "bbb")
+		}
+	})
 }
 
 func TestLogDragSelectsAcrossRows(tt *testing.T) {

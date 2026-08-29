@@ -17,6 +17,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/kuri4/dockerherocker/docker"
+	"github.com/mattn/go-runewidth"
 )
 
 type tab int
@@ -371,7 +372,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// in-flight drag) freezes the view so new lines can't scroll the
 		// highlighted rows off-screen; follow resumes once it is cleared.
 		follow := (m.logFollow || m.containerLogViewport.AtBottom()) && !m.logSel.active && !m.dragSel
-		wrapped := wrapText(msg.content, innerW(m.width)-1)
+		wrapped := wrapLogCells(msg.content, innerW(m.width)-1)
 		if msg.incremental {
 			if wrapped != "" {
 				if m.containerLogContent != "" {
@@ -876,10 +877,60 @@ func shortID(id string) string {
 	return id
 }
 
+// styleLogRows repaints the log buffer for the viewport: every row is styled
+// with the app's theme background/foreground and padded to exactly vw cells,
+// so no cell lets the terminal's default colors leak through, and the buffer
+// is padded up to height rows. Rows covered by sel get a highlighted span;
+// the rendered result keeps the same row count as the buffer (plus the pad)
+// so the persistent viewport's geometry is untouched.
+func styleLogRows(content string, sel textSel, vw, height int) string {
+	row := lipgloss.NewStyle().Background(t.Background).Foreground(t.Foreground)
+	if vw <= 0 {
+		vw = 1
+	}
+	lines := strings.Split(content, "\n")
+	top, bot := min(sel.anR, sel.endR), max(sel.anR, sel.endR)
+	for i, ln := range lines {
+		if !sel.active || i < top || i > bot {
+			lines[i] = row.Width(vw).Render(ln)
+			continue
+		}
+		from, to, ok := sel.rowSpan(i)
+		if !ok {
+			lines[i] = row.Width(vw).Render(ln)
+			continue
+		}
+		rs := []rune(ln)
+		if len(rs) == 0 {
+			lines[i] = row.Width(vw).Render("")
+			continue
+		}
+		from = max(0, min(from, len(rs)-1))
+		if to < 0 || to >= len(rs) {
+			to = len(rs) - 1
+		}
+		if from > to {
+			from, to = to, from
+		}
+		prefix := string(rs[:from])
+		span := string(rs[from : to+1])
+		suffix := string(rs[to+1:])
+		used := runewidth.StringWidth(prefix) + runewidth.StringWidth(span)
+		lines[i] = row.Render(prefix) + selTextStyle.Render(span) +
+			row.Copy().Width(max(0, vw-used)).Render(suffix)
+	}
+	for len(lines) < height {
+		lines = append(lines, row.Width(vw).Render(""))
+	}
+	return strings.Join(lines, "\n")
+}
+
 // decorateSelection re-renders content with an app-owned text selection
-// highlighted. Rows are addresses in buffer coordinates, and the rendered
+// highlighted. Rows are addressed in buffer coordinates, and the rendered
 // result keeps exactly the same line count as the input so the persistent
-// viewport's geometry is untouched.
+// viewport's geometry is untouched. Used by the Info pane, whose rows are
+// already styled: those rows are highlighted wholesale (the copied span still
+// respects the exact rune columns).
 func decorateSelection(content string, sel textSel) string {
 	if !sel.active {
 		return content
@@ -905,9 +956,8 @@ func decorateSelection(content string, sel textSel) string {
 		if from > to {
 			from, to = to, from
 		}
-		// A styled row (Info headers etc.) gets highlighted wholesale, since
-		// interleaving styles would double-apply backgrounds and drop the
-		// original color accents.
+		// A styled row gets highlighted wholesale, since interleaving styles
+		// would double-apply backgrounds and drop the original color accents.
 		if strings.ContainsRune(lines[i], '\x1b') {
 			lines[i] = selTextStyle.Render(ansiStripped(lines[i]))
 			continue
@@ -989,17 +1039,17 @@ func (m Model) renderSubLogView(w, bottomH int) string {
 		rowStyle.Render(strings.Repeat(" ", w-len([]rune(headerLeft+m.followCheckboxText())))),
 	)
 
-	logContent := m.containerLogContent
 	sel := m.logSel
 	if m.dragSel && !sel.active {
 		sel.active = true // live highlight while the drag is in flight
 	}
-	if sel.active {
-		logContent = decorateSelection(logContent, sel)
-	}
 	m.containerLogViewport.Width = w - 1              // viewport shares the pane with the scrollbar column
 	m.containerLogViewport.Height = max(bottomH-3, 1) // header + separator + blank gap row
-	m.containerLogViewport.SetContent(logContent)     // already wrapped at fetch time
+	// The buffer is already wrapped at fetch time; styleLogRows repaints every
+	// row (and the trailing cells) with the app's theme background so the
+	// terminal default never shows through, keeping the line count identical.
+	styled := styleLogRows(m.containerLogContent, sel, w-1, m.containerLogViewport.Height)
+	m.containerLogViewport.SetContent(styled)
 
 	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
 	content := lipgloss.JoinVertical(lipgloss.Top, header, sep,
@@ -1133,7 +1183,7 @@ func (m *Model) fitContainerLogViewport() {
 	if m.containerLogContent == "" {
 		return
 	}
-	m.containerLogViewport.SetContent(wrapText(m.containerLogContent, innerW(m.width)-1))
+	m.containerLogViewport.SetContent(m.containerLogContent)
 }
 
 // fitDetailViewport syncs the detail (Info) viewport's size and content on
@@ -1270,15 +1320,35 @@ func (m Model) logScreenToCell(x, y int, clamp bool) (row, col int, ok bool) {
 	if row < 0 || row >= len(lines) {
 		return 0, 0, false
 	}
-	n := len([]rune(lines[row]))
-	col = x
-	if col >= n {
-		col = n - 1
+	if col, ok := cellToRuneColumn(lines[row], x); ok {
+		return row, col, true
+	}
+	return 0, 0, false
+}
+
+// cellToRuneColumn maps a terminal cell x onto the rune index that occupies it
+// in line. Lines are pre-wrapped in cell space and stored plain, so a rune's
+// cell and its rune index diverge only for double-cell runes: x landing on
+// either half of such a rune resolves to that rune, and x beyond the end maps
+// to the last rune. The col returned is an index into []rune(line).
+func cellToRuneColumn(line string, cellX int) (col int, ok bool) {
+	col = 0
+	cells := 0
+	for i, r := range []rune(line) {
+		w := runewidth.RuneWidth(r)
+		if cells+w > cellX {
+			return i, true
+		}
+		cells += w
+		col = i
+	}
+	if cellX > cells {
+		col = len([]rune(line)) - 1
 	}
 	if col < 0 {
 		col = 0
 	}
-	return row, col, true
+	return col, true
 }
 
 // detailContentY returns the viewport-relative row for a screen y inside the
@@ -1803,22 +1873,70 @@ func formatPorts(ports []docker.Port) string {
 	return strings.Join(parts, ", ")
 }
 
-func wrapText(text string, width int) string {
+// wrapLogCells turns raw docker log content into plain, pre-wrapped buffer
+// text whose rows occupy no more than width terminal cells. ANSI SGR escapes
+// and CR bytes are stripped first, so the buffer carries only the visible
+// text; wrapping then happens in cell space (runewidth) rather than rune
+// space, breaking on rune boundaries and never splitting a double-cell rune.
+// Terminals hard-wrap text by CELLS, so wrapping by runes would let their own
+// re-wrap push real rows apart from buffer rows and break click-to-cell
+// mapping; with cell-space wrapping the buffer rows and the rendered rows
+// are always identical.
+func wrapLogCells(content string, width int) string {
+	content = ansiStripped(strings.ReplaceAll(content, "\r", ""))
 	if width <= 0 {
-		return text
+		return content
 	}
+	// Terminals render a tab as a jump to the next tab stop (every 8
+	// columns), but runewidth measures it as 0 cells. Expanding tabs to
+	// spaces here keeps the runewidth-based cell accounting identical to the
+	// terminal's and lipgloss's, so wrapped rows never visually exceed
+	// `width` cells and the row/column mapping stays authoritative.
+	content = expandTabs(content, 8)
 	var result strings.Builder
-	for _, line := range strings.Split(text, "\n") {
-		runes := []rune(line)
-		for len(runes) > width {
-			result.WriteString(string(runes[:width]))
-			result.WriteByte('\n')
-			runes = runes[width:]
+	for _, line := range strings.Split(content, "\n") {
+		var cur []rune
+		cells := 0
+		for _, r := range line {
+			w := runewidth.RuneWidth(r)
+			if cells > 0 && cells+w > width {
+				result.WriteString(string(cur))
+				result.WriteByte('\n')
+				cur = cur[:0]
+				cells = 0
+			}
+			cur = append(cur, r)
+			cells += w
 		}
-		result.WriteString(string(runes))
+		result.WriteString(string(cur))
 		result.WriteByte('\n')
 	}
 	return strings.TrimRight(result.String(), "\n")
+}
+
+// expandTabs replaces each tab with spaces that advance to the next tab stop
+// (columns evenly divisible by tabWidth, matching a default terminal).
+func expandTabs(s string, tabWidth int) string {
+	if tabWidth <= 0 || !strings.ContainsRune(s, '\t') {
+		return s
+	}
+	var out strings.Builder
+	col := 0
+	for _, r := range s {
+		switch r {
+		case '\t':
+			next := col + tabWidth - col%tabWidth
+			out.WriteString(strings.Repeat(" ", next-col))
+			col = next
+		default:
+			out.WriteRune(r)
+			col += runewidth.RuneWidth(r)
+			if r == '\n' {
+				col = 0
+			}
+		}
+	}
+	return out.String()
 }
 
 // containerLogCursor extracts the timestamp prefix of the newest non-empty
