@@ -804,8 +804,93 @@ func logTestModel() Model {
 	return m
 }
 
+func detailTestModel() Model {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.activeTab = tabContainers
+	m.activeSubTab = subTabInfo
+	m.containers = makeTestContainers(1)
+	m.detailsID = m.containers[0].ID
+	m.details = &docker.ContainerDetails{}
+	m.details.State.Status = "running"
+	m.fitViewports()
+	return m
+}
+
+func TestInfoDragSelectsAndCopies(tt *testing.T) {
+	m := detailTestModel()
+	if m.detailContent == "" {
+		tt.Fatal("detail content not built")
+	}
+	// Info content band starts right under the sub-tab strip: screen y=19 is
+	// buffer row 0 (" Info:"), y=20 -> row 1, y=22 -> row 3.
+	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 20}
+	next := testMouseUpdate(m, press)
+	if !next.detailDragSel {
+		tt.Fatal("press in the Info body should start a drag")
+	}
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 30, Y: 22})
+	if next.detailSel.endR != 3 {
+		tt.Errorf("Info drag end row = %d, want 3", next.detailSel.endR)
+	}
+	if next.detailSel.endC < 0 || next.detailSel.endC >= len([]rune(strings.Split(next.detailContent, "\n")[3])) {
+		tt.Errorf("Info drag end col = %d out of row bounds", next.detailSel.endC)
+	}
+	next, cmd := testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 30, Y: 22})
+	if !next.detailSel.active {
+		tt.Fatal("release should finalize the Info selection")
+	}
+	if cmd == nil {
+		tt.Error("non-trivial Info drag should auto-copy via OSC 52")
+	}
+	// the copied text must equal the selected plain span
+	if got := selectedText(next.detailContent, next.detailSel); got == "" {
+		tt.Error("Info selection covers no text")
+	}
+
+	// a plain click clears the Info selection
+	next = testMouseUpdate(detailTestModel(), tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 20})
+	next, cmd = testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 1, Y: 20})
+	if next.detailSel.active {
+		tt.Error("plain click must not finalize an Info selection")
+	}
+	if cmd != nil {
+		tt.Error("plain Info click should not copy")
+	}
+}
+
+func TestInfoSelectionReanchoredOnContentChange(tt *testing.T) {
+	m := detailTestModel()
+	m.containers = makeTestContainers(2)
+	m.fitViewports()
+	m.detailSel = textSel{active: true, anR: 1, anC: 2, endR: 4, endC: 5}
+	prev := m.detailContent
+	if prev == "" {
+		tt.Fatal("detail content not built")
+	}
+	// a larger split gives the pane more rows, content unchanged -> keep
+	m.height = 36
+	m.fitViewports()
+	if !m.detailSel.active {
+		tt.Error("selection should survive an identical Info rebuild")
+	}
+	// switching to a container whose body no longer contains the selected
+	// text must clear the selection instead of keeping stale coordinates
+	m.selectedIdx = 1
+	m.details = nil
+	m.detailsID = ""
+	m.fitViewports()
+	if m.detailContent == prev {
+		tt.Logf("note: switching containers did not change the body; re-anchor may legitimately keep")
+	}
+	if m.detailSel.active {
+		tt.Error("selection should clear when the Info body no longer matches")
+	}
+}
+
 func TestTextSelRowSpan(tt *testing.T) {
-	// down-right drag across three rows
 	s := textSel{anR: 0, anC: 1, endR: 2, endC: 3}
 	if got, _, ok := s.rowSpan(0); !ok || got != 1 {
 		tt.Errorf("row 0 from = %d ok=%v, want 1 true", got, ok)

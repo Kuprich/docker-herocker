@@ -137,6 +137,10 @@ type Model struct {
 	details              *docker.ContainerDetails
 	detailsID            string
 	detailViewport       viewport.Model
+	detailSel            textSel
+	detailDragSel        bool
+	detailContent        string // plain (ANSI-stripped) Info body, selection buffer geometry
+	detailStyled         string // styled Info body, re-decorated per render when selected
 }
 
 func New(dcli *docker.Client) Model {
@@ -218,11 +222,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.activeSubTab = subTabInfo
 				m.logSel = textSel{}
 				m.dragSel = false
+				m.detailSel = textSel{}
+				m.detailDragSel = false
 				return m, m.loadContainerDetails()
 			}
 		case msg.String() == "right":
 			if m.activeTab == tabContainers {
 				m.activeSubTab = subTabLogs
+				m.detailSel = textSel{}
+				m.detailDragSel = false
 				return m, m.loadContainerLogs()
 			}
 		case key.Matches(msg, keys.Up):
@@ -246,16 +254,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case key.Matches(msg, keys.Copy):
-			if m.activeTab == tabContainers && m.activeSubTab == subTabLogs && m.logSel.active {
-				return m, osc52Copy(m.selectionText())
+			if m.activeTab == tabContainers {
+				switch m.activeSubTab {
+				case subTabLogs:
+					if m.logSel.active {
+						return m, osc52Copy(m.selectionText())
+					}
+				case subTabInfo:
+					if m.detailSel.active {
+						return m, osc52Copy(selectedText(m.detailContent, m.detailSel))
+					}
+				}
 			}
 		case key.Matches(msg, keys.Back):
-			if m.activeTab == tabContainers && m.activeSubTab == subTabLogs {
-				if m.logSel.active || m.dragSel {
-					m.logSel = textSel{}
-					m.dragSel = false
-				} else {
-					m.activeSubTab = subTabInfo
+			if m.activeTab == tabContainers {
+				switch m.activeSubTab {
+				case subTabLogs:
+					if m.logSel.active || m.dragSel {
+						m.logSel = textSel{}
+						m.dragSel = false
+					} else {
+						m.activeSubTab = subTabInfo
+						m.detailSel = textSel{}
+						m.detailDragSel = false
+					}
+				case subTabInfo:
+					if m.detailSel.active || m.detailDragSel {
+						m.detailSel = textSel{}
+						m.detailDragSel = false
+					} else {
+						m.activeSubTab = subTabLogs
+						m.logSel = textSel{}
+						m.dragSel = false
+					}
 				}
 			}
 		case key.Matches(msg, keys.One):
@@ -452,6 +483,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Info pane: the same left-button drag selection, anchored in the
+		// plain detail buffer. Rows are everywhere styled, so highlight is
+		// wholesale per row; the copied text stays exactly the selected span.
+		if m.activeTab == tabContainers && m.activeSubTab == subTabInfo {
+			leftDown := msg.Type == tea.MouseLeft && msg.Action != tea.MouseActionMotion
+			leftMove := msg.Type == tea.MouseLeft && msg.Action == tea.MouseActionMotion
+			up := msg.Action == tea.MouseActionRelease
+			if leftDown || leftMove || up {
+				if m.detailDragSel {
+					switch {
+					case leftDown:
+						if r, c, ok := m.detailScreenToCell(msg.X, msg.Y, false); ok {
+							m.detailSel = textSel{anR: r, anC: c, endR: r, endC: c}
+						}
+					case leftMove:
+						if r, c, ok := m.detailScreenToCell(msg.X, msg.Y, true); ok {
+							m.detailSel.endR, m.detailSel.endC = r, c
+						}
+					case up:
+						return m, m.finishDetailSelection(msg.X, msg.Y)
+					}
+					return m, nil
+				}
+				if leftDown {
+					if r, c, ok := m.detailScreenToCell(msg.X, msg.Y, false); ok {
+						m.detailDragSel = true
+						m.detailSel = textSel{anR: r, anC: c, endR: r, endC: c}
+						return m, nil
+					}
+					return m.handleClick(msg.X, msg.Y)
+				}
+				return m, nil
+			}
+		}
+
 		if msg.Type == tea.MouseLeft {
 			return m.handleClick(msg.X, msg.Y)
 		}
@@ -640,6 +706,26 @@ func (m Model) renderContainerDetail(w, bottomH int) string {
 			lipgloss.WithWhitespaceBackground(t.Background),
 		)
 	}
+
+	vh := bottomH - 1 // a constant blank gap row at the bottom of the pane
+	if vh < 1 {
+		vh = 1
+	}
+	m.detailViewport.Width = w - 1
+	m.detailViewport.Height = vh
+
+	// Re-decorate the stored styled body with a live Info selection, if any
+	// (every Info row carries ANSI, so decorateSelection highlights whole
+	// rows; the copied span still respects the exact rune columns).
+	sel := m.detailSel
+	if m.detailDragSel && !sel.active {
+		sel.active = true
+	}
+	content := m.detailStyled
+	if sel.active {
+		content = decorateSelection(content, sel)
+	}
+	m.detailViewport.SetContent(content)
 
 	return lipgloss.Place(w, bottomH, lipgloss.Top, lipgloss.Left,
 		lipgloss.JoinHorizontal(lipgloss.Top,
@@ -1069,6 +1155,20 @@ func (m *Model) fitDetailViewport() {
 	if content == "" {
 		content = "  No container selected"
 	}
+	// Keep the plain body around as the selection buffer. When the Info
+	// content genuinely changes (details arrive, container switch) an active
+	// selection re-anchors on the matching text, like the Logs full reloads.
+	m.detailStyled = content
+	plain := ansiStripped(content)
+	if prev := m.detailContent; prev != "" && prev != plain && m.detailSel.active {
+		if s, ok := reanchorSelection(prev, m.detailSel, plain); ok {
+			m.detailSel = s
+		} else {
+			m.detailSel = textSel{}
+			m.detailDragSel = false
+		}
+	}
+	m.detailContent = plain
 	m.detailViewport.SetContent(content)
 }
 
@@ -1179,6 +1279,73 @@ func (m Model) logScreenToCell(x, y int, clamp bool) (row, col int, ok bool) {
 		col = 0
 	}
 	return row, col, true
+}
+
+// detailContentY returns the viewport-relative row for a screen y inside the
+// Info pane, or -1 when the y is not over the content band. Unlike the Logs
+// pane, the Info body starts directly under the 3-row sub-tab strip (no
+// header/separator rows).
+func (m Model) detailContentY(y int) int {
+	contentH := m.height - tabBarHeight - helpBarHeight
+	topH := int(float64(contentH) * splitRatio)
+	return y - tabBarHeight - (topH + subTabBarHeight)
+}
+
+// detailScreenToCell maps a screen (x, y) onto a buffer cell (row, rune
+// column) of the plain Info body, mirroring logScreenToCell's snapping.
+func (m Model) detailScreenToCell(x, y int, clamp bool) (row, col int, ok bool) {
+	if m.width == 0 {
+		return 0, 0, false
+	}
+	if x < appMarginX || x >= m.width-appMarginX {
+		if !clamp {
+			return 0, 0, false
+		}
+		x = max(appMarginX, min(x, m.width-appMarginX-1))
+	}
+	x -= appMarginX
+	vw := innerW(m.width) - 1
+	if x < 0 || x >= vw {
+		if !clamp {
+			return 0, 0, false
+		}
+		x = max(0, min(x, vw-1))
+	}
+	vrow := m.detailContentY(y)
+	if vrow < 0 || vrow >= m.detailViewport.Height {
+		if !clamp {
+			return 0, 0, false
+		}
+		vrow = max(0, min(vrow, m.detailViewport.Height-1))
+	}
+	lines := strings.Split(m.detailContent, "\n")
+	row = vrow + m.detailViewport.YOffset
+	if row < 0 || row >= len(lines) {
+		return 0, 0, false
+	}
+	n := len([]rune(lines[row]))
+	col = x
+	if col >= n {
+		col = n - 1
+	}
+	if col < 0 {
+		col = 0
+	}
+	return row, col, true
+}
+
+// finishDetailSelection finalizes an in-flight Info drag, mirroring
+// finishLogSelection: click leaves it inactive, a real drag auto-copies.
+func (m *Model) finishDetailSelection(x, y int) tea.Cmd {
+	m.detailDragSel = false
+	if r, c, ok := m.detailScreenToCell(x, y, true); ok {
+		m.detailSel.endR, m.detailSel.endC = r, c
+	}
+	m.detailSel.active = !m.detailSel.isTrivial()
+	if m.detailSel.active {
+		return osc52Copy(selectedText(m.detailContent, m.detailSel))
+	}
+	return nil
 }
 
 // finishLogSelection finalizes an in-flight drag: the endpoint snaps to the
@@ -1306,11 +1473,13 @@ func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
 					if i == int(subTabInfo) {
 						m.logSel = textSel{}
 						m.dragSel = false
+						return m, m.loadContainerDetails()
 					}
 					if i == int(subTabLogs) {
+						m.detailSel = textSel{}
+						m.detailDragSel = false
 						return m, m.loadContainerLogs()
 					}
-					return m, m.loadContainerDetails()
 				}
 			}
 			return m, nil
@@ -1695,6 +1864,8 @@ func (m *Model) switchTab(t tab) {
 	m.mainYOff = 0
 	m.logSel = textSel{}
 	m.dragSel = false
+	m.detailSel = textSel{}
+	m.detailDragSel = false
 	m.fitViewports()
 }
 

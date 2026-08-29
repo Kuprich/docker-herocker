@@ -267,6 +267,40 @@ def drag_copies_selection_via_osc52(s):
 
 
 @check
+def info_drag_selects_and_copies(s):
+    s.drain(3.0)
+    # click the Info sub-tab (screen rows 16..18, tab "Info" starts at x=1)
+    s.send(b"\x1b[<0;1;17M"); time.sleep(0.05)
+    s.send(b"\x1b[<0;1;17m")
+    s.drain(1.0)
+
+    sel_bg = "48;2;44;73;46"
+    osc52_re = re.compile(rb"\x1b]52;c;([A-Za-z0-9+/=]+)\x1b\\")
+
+    # Info body starts right below the 3-row sub-tab strip (screen y=19):
+    # press/motion/release across rows 1..3 of the plain body
+    s.send(b"\x1b[<0;2;20M"); time.sleep(0.05)
+    s.send(b"\x1b[<32;40;22M"); time.sleep(0.05)
+    s.send(b"\x1b[<0;40;22m")
+    s.drain(0.8)
+
+    assert sel_bg in s.allbuf.decode("utf-8", "replace"), \
+        "Info drag did not highlight any row"
+    payloads = [base64.b64decode(g) for g in osc52_re.findall(s.allbuf)]
+    assert payloads and payloads[-1], "Info drag did not copy to the clipboard"
+    assert any(ch.isprintable() for ch in payloads[-1].decode("utf-8", "replace")), \
+        "Info clipboard payload looks empty"
+
+    # plain click clears the Info selection and must NOT re-copy
+    cnt = len(payloads)
+    s.send(b"\x1b[<0;2;20M"); time.sleep(0.05)
+    s.send(b"\x1b[<0;2;20m")
+    s.drain(0.8)
+    assert len(osc52_re.findall(s.allbuf)) == cnt, \
+        "plain Info click emitted a copy"
+
+
+@check
 def selection_survives_log_refresh(s):
     s.drain(3.0)
     # open the Logs sub-tab so the log body is underneath the cursor
