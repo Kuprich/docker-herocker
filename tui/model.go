@@ -484,9 +484,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Info pane: the same left-button drag selection, anchored in the
-		// plain detail buffer. Rows are everywhere styled, so highlight is
-		// wholesale per row; the copied text stays exactly the selected span.
+		// Info pane: the same left-button drag selection, anchored in the plain
+		// detail buffer. Only the exact span over a row gets highlighted; the
+		// row's original accents around it are preserved (see decorateSelection).
 		if m.activeTab == tabContainers && m.activeSubTab == subTabInfo {
 			leftDown := msg.Type == tea.MouseLeft && msg.Action != tea.MouseActionMotion
 			leftMove := msg.Type == tea.MouseLeft && msg.Action == tea.MouseActionMotion
@@ -715,16 +715,16 @@ func (m Model) renderContainerDetail(w, bottomH int) string {
 	m.detailViewport.Width = w - 1
 	m.detailViewport.Height = vh
 
-	// Re-decorate the stored styled body with a live Info selection, if any
-	// (every Info row carries ANSI, so decorateSelection highlights whole
-	// rows; the copied span still respects the exact rune columns).
+	// Re-decorate the stored styled body with a live Info selection, if any.
+	// The span is mapped from the plain body coordinates and only the exact
+	// [from,to] range gets the highlight, mirroring the Logs pane.
 	sel := m.detailSel
 	if m.detailDragSel && !sel.active {
 		sel.active = true
 	}
 	content := m.detailStyled
 	if sel.active {
-		content = decorateSelection(content, sel)
+		content = decorateSelection(content, m.detailContent, sel)
 	}
 	m.detailViewport.SetContent(content)
 
@@ -934,16 +934,26 @@ func styleLogRows(content string, sel textSel, vw, height, yoff int) string {
 }
 
 // decorateSelection re-renders content with an app-owned text selection
-// highlighted. Rows are addressed in buffer coordinates, and the rendered
-// result keeps exactly the same line count as the input so the persistent
-// viewport's geometry is untouched. Used by the Info pane, whose rows are
-// already styled: those rows are highlighted wholesale (the copied span still
-// respects the exact rune columns).
-func decorateSelection(content string, sel textSel) string {
+// highlighted. Rows are addressed in buffer coordinates against the plain
+// body (which has the same rune layout as the styled one before the trailing
+// fill), and the rendered result keeps exactly the same line count as the
+// input so the persistent viewport's geometry is untouched. Only the exact
+// span [from,to] is painted with the selection style; every other cell keeps
+// its original styling - the same partial highlight the Logs pane does.
+func decorateSelection(content, plain string, sel textSel) string {
 	if !sel.active {
 		return content
 	}
 	lines := strings.Split(content, "\n")
+	limit := lines
+	if plain != "" {
+		limit = strings.Split(plain, "\n")
+	} else {
+		limit = make([]string, len(lines))
+		for i, l := range lines {
+			limit[i] = strings.TrimRight(ansiStripped(l), " ")
+		}
+	}
 	top, bot := min(sel.anR, sel.endR), max(sel.anR, sel.endR)
 	if top < 0 || top >= len(lines) {
 		return content
@@ -953,9 +963,15 @@ func decorateSelection(content string, sel textSel) string {
 		if !ok {
 			continue
 		}
-		n := len([]rune(lines[i]))
-		if n == 0 {
+		styledN := len([]rune(ansiStripped(lines[i])))
+		if styledN == 0 {
 			continue
+		}
+		n := styledN
+		if i < len(limit) {
+			if ln := len([]rune(limit[i])); ln != 0 {
+				n = ln
+			}
 		}
 		from = max(0, min(from, n-1))
 		if to < 0 || to >= n {
@@ -964,23 +980,104 @@ func decorateSelection(content string, sel textSel) string {
 		if from > to {
 			from, to = to, from
 		}
-		// A styled row gets highlighted wholesale, since interleaving styles
-		// would double-apply backgrounds and drop the original color accents.
-		if strings.ContainsRune(lines[i], '\x1b') {
-			lines[i] = selTextStyle.Render(ansiStripped(lines[i]))
-			continue
-		}
-		// Plain rows are padded to the full block width upstream, but the
-		// sel span ends in an ANSI reset that would kill the theme background
-		// for everything right of it (a default-bg leak), so the untouched
-		// prefix/suffix are re-painted explicitly instead of left bare.
-		rowStyle := lipgloss.NewStyle().Background(t.Background).Foreground(t.Foreground)
-		rs := []rune(lines[i])
-		lines[i] = rowStyle.Render(string(rs[:from])) +
-			selTextStyle.Render(string(rs[from:to+1])) +
-			rowStyle.Render(string(rs[to+1:]))
+		lines[i] = highlightStyledSpan(lines[i], from, to)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// highlightStyledSpan re-styles a rendered Info row so exactly the rune span
+// [from,to] (visible-rune space of the plain body) is painted with the
+// selection background while every other cell keeps its original styling.
+// Escape sequences that styled a span rune are dropped (the span is
+// re-painted), the ones left of the span stay verbatim, and bare text right
+// of the span is re-painted with the theme background so the selection reset
+// can never leak default terminal cells.
+func highlightStyledSpan(line string, from, to int) string {
+	var before, span, after []rune
+	in := []rune(line)
+	part := 0 // 0 before / 1 span / 2 after
+	vis := 0
+	i := 0
+	for i < len(in) {
+		if in[i] == '\x1b' {
+			j := i + 1
+			for j < len(in) {
+				c := in[j]
+				if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+					break
+				}
+				j++
+			}
+			if j >= len(in) {
+				break
+			}
+			// Sequences styling a span rune are swallowed: [from,to] is
+			// re-painted wholesale, so carrying them over would double-apply
+			// backgrounds and drop the span's own color accents.
+			if (part == 0 && vis < from) || part == 2 {
+				out := &before
+				if part == 2 {
+					out = &after
+				}
+				*out = append(*out, in[i:j+1]...)
+			}
+			i = j + 1
+			continue
+		}
+		if part == 0 && vis == from {
+			part = 1
+		}
+		switch part {
+		case 0:
+			before = append(before, in[i])
+		case 1:
+			span = append(span, in[i])
+		case 2:
+			after = append(after, in[i])
+		}
+		vis++
+		i++
+		if part == 1 && vis > to {
+			part = 2
+		}
+	}
+
+	base := lipgloss.NewStyle().Background(t.Background).Foreground(t.Foreground)
+	return string(before) + selTextStyle.Render(string(span)) + repaintBare(after, base)
+}
+
+// repaintBare re-emits the tail of a split styled row: escape sequences are
+// kept verbatim (they carry their own background/color), bare text runs are
+// re-painted with base. Without this, bare text right of the selection reset
+// would fall back to the default terminal background.
+func repaintBare(after []rune, base lipgloss.Style) string {
+	var b strings.Builder
+	i := 0
+	for i < len(after) {
+		if after[i] == '\x1b' {
+			j := i + 1
+			for j < len(after) {
+				c := after[j]
+				if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+					break
+				}
+				j++
+			}
+			if j >= len(after) {
+				return b.String() + string(after[i:])
+			}
+			b.WriteString(string(after[i : j+1]))
+			i = j + 1
+			continue
+		}
+		j := i
+		for j < len(after) && after[j] != '\x1b' {
+			j++
+		}
+		b.WriteString(base.Render(string(after[i:j])))
+		i = j
+	}
+	return b.String()
 }
 
 // selectedText returns the visible text covered by the selection, one line

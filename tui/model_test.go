@@ -941,7 +941,7 @@ func TestDecorateSelectionSpansRows(tt *testing.T) {
 	withTrueColor(tt, func() {
 		content := "aaaa\nbbbb\ncccc"
 		sel := textSel{active: true, anR: 0, anC: 1, endR: 2, endC: 2}
-		out := decorateSelection(content, sel)
+		out := decorateSelection(content, content, sel)
 
 		if plain := stripANSI(out); plain != content {
 			tt.Errorf("decorate changed visible text:\n got %q\nwant %q", plain, content)
@@ -969,12 +969,13 @@ func TestDecorateSelectionPlainRowNoBareTail(tt *testing.T) {
 		w := 80
 		m.containers = makeTestContainers(1)
 		sel := textSel{active: true, anR: 1, anC: 2, endR: 1, endC: 9}
-		out := decorateSelection(m.buildDetailContent(w), sel)
+		out := decorateSelection(m.buildDetailContent(w), "", sel)
 		for i, ln := range strings.Split(out, "\n") {
-			for _, bare := range []string{"\x1b[0m ", "\x1b[0m\x1b[0m"} {
-				if strings.Contains(ln, bare) {
-					tt.Errorf("row %d leaks unstyled cells after a reset: %q", i, ln)
-				}
+			// the leak to guard against is a reset immediately followed by an
+			// unstyled cell: those are default-bg spaces. A doubled reset has
+			// no visible effect and shows up at styled-fill boundaries.
+			if strings.Contains(ln, "\x1b[0m ") {
+				tt.Errorf("row %d leaks unstyled cells after a reset: %q", i, ln)
 			}
 			if strings.Contains(ln, "Name") && !strings.Contains(ln, "48;2;44;73;46") {
 				tt.Errorf("selected Name row missing highlight: %q", ln)
@@ -983,21 +984,31 @@ func TestDecorateSelectionPlainRowNoBareTail(tt *testing.T) {
 	})
 }
 
-func TestDecorateSelectionStyledRowFallsBackWholeLine(tt *testing.T) {
+func TestDecorateSelectionStyledRowPartialHighlight(tt *testing.T) {
 	withTrueColor(tt, func() {
-		styled := "\x1b[36m" + "Title" + "\x1b[0m"
+		// Selecting a slice of a styled row must keep the surrounding styling
+		// (here cyan) and highlight only the exact span, like the Logs pane.
+		styled := "\x1b[36mTITLE\x1b[0m"
 		content := "plain\n" + styled
-		sel := textSel{active: true, anR: 0, anC: 0, endR: 1, endC: 1}
-		out := decorateSelection(content, sel)
+		sel := textSel{active: true, anR: 1, anC: 1, endR: 1, endC: 3}
+		out := decorateSelection(content, "plain\nTITLE", sel)
 		lines := strings.Split(out, "\n")
-		if plain := stripANSI(lines[1]); plain != "Title" {
-			tt.Errorf("styled row = %q, want stripped %q", plain, "Title")
+		if plain := stripANSI(lines[1]); plain != "TITLE" {
+			tt.Errorf("styled row = %q, want stripped %q", plain, "TITLE")
 		}
 		if !strings.Contains(lines[1], "48;2;44;73;46") {
-			tt.Errorf("styled row should be highlighted, got: %q", lines[1])
+			tt.Errorf("styled row should carry the selection highlight, got: %q", lines[1])
 		}
-		if strings.Contains(out, "\x1b[36m\x1b[48") && strings.Count(lines[1], "Title") != 2 {
-			tt.Errorf("styled row must not double-apply styles: %q", lines[1])
+		// span is the middle cols 1..3 ("ITL"); the cyan prefix must survive
+		// unchanged and the cyan-accent row must not be double-applied.
+		if !strings.HasPrefix(lines[1], "\x1b[36mT") {
+			tt.Errorf("unselected prefix lost its cyan styling: %q", lines[1])
+		}
+		if strings.Count(lines[1], "TITLE") != 0 {
+			tt.Errorf("styled row must not double-apply text: %q", lines[1])
+		}
+		if !strings.HasSuffix(stripANSI(lines[1]), "E") || strings.Contains(lines[1], "\x1b[36mLE") {
+			tt.Errorf("unselected tail must keep theme styling, not cyan: %q", lines[1])
 		}
 	})
 }
@@ -1215,7 +1226,7 @@ func TestLogSelectionReanchoredAfterFullReplace(tt *testing.T) {
 			next.logSel.anR, next.logSel.anC, next.logSel.endR, next.logSel.endC)
 	}
 	// decoration renders the highlight on the shifted rows
-	dec := decorateSelection(next.containerLogContent, next.logSel)
+	dec := decorateSelection(next.containerLogContent, "", next.logSel)
 	for _, wantLine := range []string{"beta", "gamma", "delt"} {
 		found := strings.Contains(dec, selTextStyle.Render(wantLine))
 		if !found {
