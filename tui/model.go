@@ -519,19 +519,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleMenuMouse(msg)
 		}
 
-		// Right-click over a container row opens the popup anchored at the
-		// cursor and makes that row current. The selection branches below
-		// only ever claim the left button, so elsewhere the right press falls
-		// through harmlessly to the existing handlers.
-		if msg.Type == tea.MouseRight && msg.Action == tea.MouseActionPress {
-			if r, ok := m.tableRowAt(msg.Y); ok {
-				m.selectedIdx = r
-				m.menu = m.buildContainerMenu(msg.X, msg.Y)
-				m.menuOpen = true
-				return m, nil
-			}
-		}
-
 		// Logs pane: the left button drags an app-owned text selection over
 		// the log body (reжим A). It is anchored in buffer coordinates so it
 		// tracks correctly through scroll and follow-appends. Sub-tab strip,
@@ -1798,43 +1785,14 @@ func cellAt(content string, r int) (int, int) {
 	return 0, 0
 }
 
-// tableRowAt maps a mouse screen row y (the same 1-based convention
-// handleClick uses) to a visible container-list index on the Containers tab.
-// The tab bar, list header and sub-tab strip are excluded, so only real
-// container rows hit.
-func (m Model) tableRowAt(y int) (int, bool) {
-	if m.activeTab != tabContainers {
-		return 0, false
-	}
-	contentH := m.height - tabBarHeight - helpBarHeight
-	topH := int(float64(contentH) * splitRatio)
-	absY := y - tabBarHeight
-	if absY < 0 || absY >= topH {
-		return 0, false
-	}
-	rowY := absY - 2 + m.mainYOff
-	if rowY < 0 || rowY >= len(m.containers) {
-		return 0, false
-	}
-	return rowY, true
-}
-
-// visibleRowY returns the 1-based screen row the container-list index i is
-// actually drawn on (the inverse of tableRowAt, matching where
-// renderContainerList emits header, separator and rows). It anchors the
-// keyboard-opened context menu (x) on the selected row the same way the
-// mouse right-click does.
-func (m Model) visibleRowY(i int) int {
-	return tabBarHeight + 3 + i - m.mainYOff
-}
-
-// openContextMenu raises the container context menu (x / right-click) for the
-// currently selected row, mirroring the mouse path.
+// openContextMenu raises the container context menu for the currently
+// selected row, centered on the screen (keyboard x; the mouse right-click no
+// longer opens it).
 func (m *Model) openContextMenu() {
 	if m.activeTab != tabContainers || m.selectedIdx < 0 || m.selectedIdx >= len(m.containers) {
 		return
 	}
-	m.menu = m.buildContainerMenu(appMarginX+1, m.visibleRowY(m.selectedIdx))
+	m.menu = m.buildContainerMenu()
 	m.menuOpen = true
 }
 

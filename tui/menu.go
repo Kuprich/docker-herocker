@@ -11,7 +11,7 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
-// menuItem is a single action in the container right-click popup. activate
+// menuItem is a single action in the container context menu. activate
 // returns the tea.Cmd to dispatch (nil keeps the popup open). confirm marks
 // a staging item (Remove variants) whose activation swaps the popup into the
 // destructive-action confirm stage instead of dispatching anything;
@@ -23,9 +23,9 @@ type menuItem struct {
 	activate      func() tea.Cmd
 }
 
-// popupMenu is the container context menu. x,y holds the 0-based screen
-// cell of its top-left corner; w,h its box size in cells (already clamped to
-// the terminal). confirm marks the second, destructive-action stage.
+// popupMenu is the container context menu, centered on the screen. x,y holds
+// the 0-based cell of its top-left corner; w,h its box size in cells (already
+// clamped to the terminal). confirm marks the second, destructive stage.
 type popupMenu struct {
 	items   []menuItem
 	x, y    int
@@ -77,6 +77,9 @@ func (m *Model) enterRemoveConfirm(withData bool) {
 		{label: "No, cancel", activate: func() tea.Cmd { return nil }},
 	}
 	m.menu.w, m.menu.h = menuMeasure(m.menu.items, m.menu.header)
+	// keep the enlarged confirm box centered like the first stage
+	m.menu.x = max((m.width-m.menu.w)/2, 0)
+	m.menu.y = max((m.height-m.menu.h)/2, tabBarHeight+1)
 }
 
 // removeContainer / removeContainerVolumes remove the selected container
@@ -116,28 +119,22 @@ func containerDisplayName(c docker.Container) string {
 	return c.ID
 }
 
-// buildContainerMenu anchors the popup at the 1-based mouse cell (mx,my) —
-// the same coordinate convention tea.MouseMsg exposes — then clamps the box
-// into the terminal, keeping it clear of the tab bar.
-func (m Model) buildContainerMenu(mx, my int) popupMenu {
+// buildContainerMenu builds the popup for the selected container, centered on
+// the screen and clamped into the terminal, keeping it clear of the tab bar.
+// The keyboard's x opens it; there is no mouse anchor anymore.
+func (m Model) buildContainerMenu() popupMenu {
 	c := m.containers[m.selectedIdx]
 	items := m.containerMenuItems(c)
-	w, h := menuMeasure(items, "")
-	px := mx - 1
-	py := my - 1
-	if px+w > m.width {
-		px = m.width - w
+	header := "Действия с контейнером " + containerDisplayName(c)
+	w, h := menuMeasure(items, header)
+	return popupMenu{
+		items:  items,
+		header: header,
+		x:      max((m.width-w)/2, 0),
+		y:      max((m.height-h)/2, tabBarHeight+1),
+		w:      w,
+		h:      h,
 	}
-	if px < 0 {
-		px = 0
-	}
-	if py+h > m.height {
-		py = m.height - h
-	}
-	if py < tabBarHeight+1 {
-		py = tabBarHeight + 1
-	}
-	return popupMenu{items: items, x: px, y: py, w: w, h: h}
 }
 
 // menuMeasure computes the popup box size: 2 border columns plus the widest

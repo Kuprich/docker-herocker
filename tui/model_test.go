@@ -175,6 +175,13 @@ func testMouseUpdate(m Model, msg tea.Msg) Model {
 	return next.(Model)
 }
 
+// openMenuFor raises the container context menu via the x key for the
+// selected index.
+func openMenuFor(m Model, idx int) Model {
+	m.selectedIdx = idx
+	return testMouseUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+}
+
 func TestClickInLeftMarginIsIgnored(tt *testing.T) {
 	m := New(nil)
 	m.width = 120
@@ -1699,7 +1706,7 @@ func TestRenderContainerMenuShape(tt *testing.T) {
 
 	m := detailTestModel()
 	m.containers = makeTestContainers(3)
-	m.menu = m.buildContainerMenu(20, 6) // 1-based mouse cell over table row 1
+	m.menu = m.buildContainerMenu()
 	tt.Logf("popup at (%d,%d) %dx%d:\n%s", m.menu.x, m.menu.y, m.menu.w, m.menu.h,
 		strings.Join(m.renderContainerMenu(), "\n"))
 
@@ -1712,27 +1719,44 @@ func TestRenderContainerMenuShape(tt *testing.T) {
 			tt.Errorf("menu row width = %d, want %d: %q", lipgloss.Width(r), m.menu.w, stripANSI(r))
 		}
 	}
-	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[1]), "│")); got != "Stop" {
+	wantTitle := "Действия с контейнером " + containerDisplayName(m.containers[0])
+	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[1]), "│")); got != wantTitle {
+		tt.Errorf("title = %q, want %q", got, wantTitle)
+	}
+	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[2]), "│")); got != "Stop" {
 		tt.Errorf("first item = %q, want a Stop row for a running container", got)
 	}
-	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[2]), "│")); got != "Remove" {
+	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[3]), "│")); got != "Remove" {
 		tt.Errorf("second item = %q, want Remove", got)
 	}
-	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[3]), "│")); got != "Remove with data" {
+	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[4]), "│")); got != "Remove with data" {
 		tt.Errorf("third item = %q, want Remove with data", got)
 	}
 
 	// the selected row (sel=0) is inverted with the accent background; the
 	// other rows are not
 	activeBG := ";48;2;46;160;67m"
-	if !strings.Contains(rows[1], activeBG) {
+	if !strings.Contains(rows[2], activeBG) {
 		tt.Error("selected menu row must carry the accent background")
-	}
-	if strings.Contains(rows[2], activeBG) {
-		tt.Error("unselected menu row must not carry the accent background")
 	}
 	if strings.Contains(rows[3], activeBG) {
 		tt.Error("unselected menu row must not carry the accent background")
+	}
+	if strings.Contains(rows[4], activeBG) {
+		tt.Error("unselected menu row must not carry the accent background")
+	}
+
+	// the box is centered within the terminal, clear of the tab bar
+	wantX := max((m.width-m.menu.w)/2, 0)
+	if m.menu.x != wantX {
+		tt.Errorf("menu.x = %d, want centered %d", m.menu.x, wantX)
+	}
+	wantY := max((m.height-m.menu.h)/2, tabBarHeight+1)
+	if m.menu.y != wantY {
+		tt.Errorf("menu.y = %d, want centered %d", m.menu.y, wantY)
+	}
+	if m.menu.y <= tabBarHeight {
+		tt.Errorf("menu must clear the tab bar, y = %d", m.menu.y)
 	}
 
 	// two-stage Remove: entering the confirm swap rebuilds the box with a
@@ -1772,44 +1796,26 @@ func TestRenderContainerMenuShape(tt *testing.T) {
 	}
 }
 
-func TestRightClickOpensContainerMenu(tt *testing.T) {
+func TestRightClickDoesNotOpenMenu(tt *testing.T) {
 	m := detailTestModel()
 	m.containers = makeTestContainers(3)
 	m.fitViewports()
 
-	// right press over table row 0 (1-based y: tabBar(3)+hdr(1)+row(1))
-	press := tea.MouseMsg{Type: tea.MouseRight, Action: tea.MouseActionPress, X: 20, Y: 5}
-	next := testMouseUpdate(m, press)
-	if !next.menuOpen {
-		tt.Fatal("right-click on a container row should open the popup")
+	// ПКМ больше не открывает контекстное меню — только клавиша x на
+	// выбранной строке, и поэтому она не двигает выделение.
+	for _, y := range []int{5, 6, 12} {
+		next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseRight, Action: tea.MouseActionPress, X: 20, Y: y})
+		if next.menuOpen {
+			tt.Fatalf("right-click at y=%d opened the popup", y)
+		}
+		if next.selectedIdx != 0 {
+			tt.Errorf("right-click at y=%d moved the selection to %d", y, next.selectedIdx)
+		}
 	}
-	if next.selectedIdx != 0 {
-		tt.Errorf("popup should select the clicked row, got %d", next.selectedIdx)
-	}
-	if got := next.menu.items[0].label; got != "Stop" {
-		tt.Errorf("first item = %q, want Stop for a running container", got)
-	}
-	if got := next.menu.items[1].label; got != "Remove" {
-		tt.Errorf("second item = %q, want Remove", got)
-	}
-	if got := next.menu.items[2].label; got != "Remove with data" {
-		tt.Errorf("third item = %q, want Remove with data", got)
-	}
-	// the anchor tracks the cursor (1-based mouse cell -> 0-based top-left)
-	if next.menu.x != 19 || next.menu.y != 4 {
-		tt.Errorf("anchor = (%d,%d), want (19,4)", next.menu.x, next.menu.y)
-	}
-
-	// the frame's own release must not close the popup
-	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseRight, Action: tea.MouseActionRelease, X: 20, Y: 5})
-	if !next.menuOpen {
-		tt.Fatal("right release after the opening press must keep the popup open")
-	}
-
-	// a right-click on a non-row area (below the table, sub-tab strip side)
-	off := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseRight, Action: tea.MouseActionPress, X: 20, Y: 12})
-	if off.menuOpen {
-		tt.Fatal("right-click off the table rows must not open a popup")
+	// release likewise
+	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseRight, Action: tea.MouseActionRelease, X: 20, Y: 5})
+	if next.menuOpen {
+		tt.Fatal("right release opened the popup")
 	}
 }
 
@@ -1817,7 +1823,7 @@ func TestMenuNavigationAndEsc(tt *testing.T) {
 	m := detailTestModel()
 	m.containers = makeTestContainers(3)
 	m.fitViewports()
-	m = testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseRight, Action: tea.MouseActionPress, X: 20, Y: 5})
+	m = openMenuFor(m, 0)
 
 	down := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}
 	up := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")}
@@ -1857,7 +1863,7 @@ func TestMenuNavigationAndEsc(tt *testing.T) {
 
 	// a stray key closes the popup and is swallowed: it must not leak into
 	// the normal key handling (restart would run, selection would move)
-	m = testMouseUpdate(detailTestModel(), tea.MouseMsg{Type: tea.MouseRight, Action: tea.MouseActionPress, X: 20, Y: 5})
+	m = openMenuFor(detailTestModel(), 0)
 	next, _ = testUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
 	if next.menuOpen {
 		tt.Fatal("a stray key should close the popup")
@@ -1871,9 +1877,9 @@ func TestMenuActivateStartStop(tt *testing.T) {
 	m := detailTestModel()
 	m.containers = makeTestContainers(3)
 	m.fitViewports()
-	m = testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseRight, Action: tea.MouseActionPress, X: 20, Y: 6}) // row 1 (exited)
+	m = openMenuFor(m, 1) // exited
 	if m.selectedIdx != 1 {
-		tt.Fatalf("clicked row = %d, want 1", m.selectedIdx)
+		tt.Fatalf("selected row = %d, want 1", m.selectedIdx)
 	}
 	if got := m.menu.items[0].label; got != "Start" {
 		tt.Errorf("first item = %q, want Start for an exited container", got)
@@ -1892,12 +1898,12 @@ func TestMenuClickOutsideCloses(tt *testing.T) {
 	m := detailTestModel()
 	m.containers = makeTestContainers(3)
 	m.fitViewports()
-	m = testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseRight, Action: tea.MouseActionPress, X: 20, Y: 5})
+	m = openMenuFor(m, 0)
 
-	// left-click on the second item (one row below the top border) activates
-	// it: Remove enters the confirm stage and keeps the popup open
-	itemY := m.menu.y + 2 + 1 // 0-based row -> 1-based mouse Y
-	itemX := m.menu.x + 2 + 1
+	// left-click on the Remove item (title row + one item above it, plus the
+	// top border) activates it and keeps the popup open in the confirm stage
+	itemY := m.menu.y + 3 + 1 // 0-based row -> 1-based mouse Y
+	itemX := m.menu.x + 3 + 1
 	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: itemX, Y: itemY})
 	if !next.menuOpen {
 		tt.Fatal("click on the Remove item should keep the popup open (confirm stage)")
@@ -1917,10 +1923,7 @@ func TestMenuClickOutsideCloses(tt *testing.T) {
 	// motion must not close; a wheel press closes. Open a fresh popup for this
 	// (m is still open from the first right-click, and a right-press while a
 	// popup is open deliberately closes it rather than re-anchoring).
-	m = detailTestModel()
-	m.containers = makeTestContainers(3)
-	m.fitViewports()
-	m = testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseRight, Action: tea.MouseActionPress, X: 20, Y: 5})
+	m = openMenuFor(detailTestModel(), 0)
 	m = testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 20, Y: 5})
 	if !m.menuOpen {
 		tt.Fatal("mouse motion must not close the popup")
@@ -1935,15 +1938,12 @@ func TestMenuRemoveFlows(tt *testing.T) {
 	down := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}
 	enter := tea.KeyMsg{Type: tea.KeyEnter}
 
-	openAt := func(y int) Model {
-		m := detailTestModel()
-		m.containers = makeTestContainers(3)
-		m.fitViewports()
-		return testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseRight, Action: tea.MouseActionPress, X: 20, Y: y})
+	openAt := func(idx int) Model {
+		return openMenuFor(detailTestModel(), idx)
 	}
 
 	// plain Remove: down to it, Enter stages the confirm, Enter confirms Yes
-	m := openAt(5) // row 0
+	m := openAt(0) // row 0
 	next, cmd := testUpdate(m, down)
 	if next.menu.sel != 1 {
 		tt.Fatalf("down = %d, want Remove at 1", next.menu.sel)
@@ -1967,7 +1967,7 @@ func TestMenuRemoveFlows(tt *testing.T) {
 	}
 
 	// Escape in the confirm stage cancels without dispatching
-	m = openAt(5)
+	m = openAt(0)
 	next, _ = testUpdate(m, down)
 	next, _ = testUpdate(next, enter)
 	next, cmd = testUpdate(next, tea.KeyMsg{Type: tea.KeyEsc})
@@ -1979,7 +1979,7 @@ func TestMenuRemoveFlows(tt *testing.T) {
 	}
 
 	// "No, cancel" closes the popup without dispatching
-	m = openAt(5)
+	m = openAt(0)
 	next, _ = testUpdate(m, down)
 	next, _ = testUpdate(next, enter)
 	next, _ = testUpdate(next, down) // sel moves to "No, cancel"
@@ -1995,7 +1995,7 @@ func TestMenuRemoveFlows(tt *testing.T) {
 	}
 
 	// Remove with data: down twice, Enter, confirm header mentions volumes
-	m = openAt(5)
+	m = openAt(0)
 	next, _ = testUpdate(m, down)
 	next, _ = testUpdate(next, down)
 	if next.menu.sel != 2 {
@@ -2041,9 +2041,15 @@ func TestKeyXOpensContextMenu(tt *testing.T) {
 	if got := next.menu.items[2].label; got != "Remove with data" {
 		tt.Errorf("third item = %q", got)
 	}
-	// the popup anchors on the selected row where it really renders
-	if want := next.visibleRowY(next.selectedIdx) - 1; next.menu.y != want {
-		tt.Errorf("popup y = %d, want %d (selected row)", next.menu.y, want)
+	if got := next.menu.header; got != "Действия с контейнером test-container-2" {
+		tt.Errorf("menu title = %q", got)
+	}
+	// the popup is centered on the screen, clear of the tab bar
+	if want := max((next.width-next.menu.w)/2, 0); next.menu.x != want {
+		tt.Errorf("popup x = %d, want centered %d", next.menu.x, want)
+	}
+	if want := max((next.height-next.menu.h)/2, tabBarHeight+1); next.menu.y != want {
+		tt.Errorf("popup y = %d, want centered %d", next.menu.y, want)
 	}
 
 	// x while the popup is open closes it (stray key), without dispatching
@@ -2052,7 +2058,7 @@ func TestKeyXOpensContextMenu(tt *testing.T) {
 		tt.Fatal("x while a popup is open should close it")
 	}
 
-	// j/k move the selection; x then anchors on the new row
+	// j/k move the selection; x then opens the centered popup for the new row
 	next, _ = testUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
 	if next.selectedIdx != 1 {
 		tt.Fatalf("k = %d, want 1", next.selectedIdx)
@@ -2061,8 +2067,11 @@ func TestKeyXOpensContextMenu(tt *testing.T) {
 	if !next.menuOpen {
 		tt.Fatal("x after k should open the popup")
 	}
-	if want := next.visibleRowY(1) - 1; next.menu.y != want {
-		tt.Errorf("popup y after k = %d, want %d", next.menu.y, want)
+	if got := next.menu.header; got != "Действия с контейнером test-container-1" {
+		tt.Errorf("menu title after k = %q", got)
+	}
+	if want := max((next.width-next.menu.w)/2, 0); next.menu.x != want {
+		tt.Errorf("popup x after k = %d, want centered %d", next.menu.x, want)
 	}
 
 	// x on another tab must not open the popup
