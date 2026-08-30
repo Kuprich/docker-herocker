@@ -2205,3 +2205,125 @@ func TestTabBarToastBadge(tt *testing.T) {
 		tt.Error("badge should be skipped when the terminal is too narrow")
 	}
 }
+
+func TestInsertStyledLinePreservesTailColors(tt *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	tt.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+
+	border := lipgloss.NewStyle().
+		Background(t.Background).Foreground(t.Border).
+		Render(strings.Repeat("─", 40))
+
+	popup := MenuBoxStyle.Render(strings.Repeat("x", 10))
+	out := insertStyledLine(border, 10, 10, popup)
+
+	// The popup lands first, its own style must be on the boxed cells.
+	if !strings.Contains(out, string(popup)) {
+		tt.Fatal("popup not present in spliced line")
+	}
+
+	// The dash run spans the splice: cells right of the block keep the border
+	// foreground (#30363d = 48;54;60), not the app foreground (#e6edf3 =
+	// 230;237;243) that the pre-fix repaint forced, turning the line white.
+	tail := out[strings.Index(out, string(popup))+len(popup):]
+	if !strings.Contains(tail, "38;2;48;54;60") {
+		tt.Errorf("tail dash run not restored with border fg: %q", tail)
+	}
+	if strings.Contains(tail, "38;2;230;237;243") {
+		tt.Errorf("tail dash run repainted with app fg: %q", tail)
+	}
+
+	// Visible layout: 10 dashes, the 10-cell popup, 20 trailing dashes.
+	if got, want := stripANSI(out), strings.Repeat("─", 10)+strings.Repeat("x", 10)+strings.Repeat("─", 20); got != want {
+		tt.Errorf("spliced line = %q, want %q", got, want)
+	}
+}
+
+func TestInsertStyledLineKeepsMenuRightBorderMuted(tt *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	tt.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+
+	m := detailTestModel()
+	m.containers = makeTestContainers(3)
+	m.fitViewports()
+	m = openMenuFor(m, 0)
+	if !m.menuOpen {
+		tt.Fatal("menu not open")
+	}
+
+	// The right border cell of every popup row must be painted muted-on-surface.
+	// The pre-fix item rows ended with the item style's reset, leaking the
+	// trailing │ in the terminal default color.
+	for r, row := range m.renderContainerMenu() {
+		vis := []rune(stripANSI(row))
+		if len(vis) == 0 {
+			continue
+		}
+		right := vis[len(vis)-1]
+		if !strings.ContainsRune("┌┐└┘│", right) {
+			tt.Errorf("menu row %d does not end with a box glyph: %q", r, string(vis))
+			continue
+		}
+		sgr := sgrStyleAt(row, right)
+		if !strings.Contains(sgr, "139;147;158") {
+			tt.Errorf("menu row %d right border %q not painted muted (style %q): %q", r, string(right), sgr, row)
+		}
+	}
+}
+
+// sgrStyleAt returns the SGR sequence styling the last occurrence of g in row
+// (the sequence that begins at or before the glyph and governs its color).
+func sgrStyleAt(row string, g rune) string {
+	idx := strings.LastIndex(row, string(g))
+	if idx < 0 {
+		return ""
+	}
+	// walk back to the escape sequence that styles this cell
+	j := idx
+	for j > 0 && row[j] != '\x1b' {
+		j--
+	}
+	k := j
+	for k < len(row) && !((row[k] >= 'a' && row[k] <= 'z') || (row[k] >= 'A' && row[k] <= 'Z')) {
+		k++
+	}
+	if k < len(row) {
+		return row[j : k+1]
+	}
+	return ""
+}
+
+func TestParseSGRState(tt *testing.T) {
+	cases := []struct {
+		seq    string
+		wantFG string
+		wantBG string
+	}{
+		{"\x1b[38;2;48;54;60;48;2;13;17;23m", "38;2;48;54;60", "48;2;13;17;23"},
+		{"\x1b[0m", "", ""},
+		{"\x1b[39m", "", ""},
+		{"\x1b[49m", "", ""},
+		{"\x1b[1m", "", ""},
+		{"\x1b[?25l", "", ""},
+		{"\x1b[38;2;230;237;243;48;2;22;27;34m", "38;2;230;237;243", "48;2;22;27;34"},
+	}
+	for _, c := range cases {
+		fg, bg := "", ""
+		parseSGRState(c.seq, &fg, &bg)
+		if fg != c.wantFG || bg != c.wantBG {
+			tt.Errorf("parseSGRState(%q) = fg %q bg %q, want fg %q bg %q",
+				c.seq, fg, bg, c.wantFG, c.wantBG)
+		}
+	}
+	if got := sgrRestore("38;2;48;54;60", "48;2;13;17;23"); got != "\x1b[38;2;48;54;60;48;2;13;17;23m" {
+		tt.Errorf("sgrRestore fg+bg = %q", got)
+	}
+	if got := sgrRestore("", ""); got != "" {
+		tt.Errorf("sgrRestore default = %q, want empty", got)
+	}
+	if got := sgrRestore("38;2;48;54;60", ""); got != "\x1b[38;2;48;54;60m" {
+		tt.Errorf("sgrRestore fg only = %q", got)
+	}
+}

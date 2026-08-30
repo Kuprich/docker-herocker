@@ -186,7 +186,7 @@ func (m Model) renderContainerMenu() []string {
 		if i == m.menu.sel {
 			style = MenuActiveItemStyle
 		}
-		rows = append(rows, MenuBoxStyle.Render("│"+style.Render(" "+padMenuRunes(it.label, iw-1))+"│"))
+		rows = append(rows, MenuBoxStyle.Render("│"+style.Render(" "+padMenuRunes(it.label, iw-1)))+MenuBoxStyle.Render("│"))
 	}
 	rows = append(rows, MenuBoxStyle.Render("└"+strings.Repeat("─", iw)+"┘"))
 	return rows
@@ -306,8 +306,10 @@ func (m Model) splicePopup(content string) string {
 // insertStyledLine overlays one popup row (exactly cover cells wide) onto a
 // styled content line at visible column col. Escape sequences are hopped over
 // while visible cells are counted; sequences whose span falls inside the
-// covered region are dropped, and the tail right of the block is re-painted
-// with the base background (repaintBare) so no default-terminal cells leak.
+// covered region are dropped. The tail right of the block is re-emitted with
+// the SGR state that was active at the block's right edge restored in front of
+// it, so runs spanning the block keep their original foreground/background
+// instead of being repainted with a flat color.
 func insertStyledLine(line string, col, cover int, popup string) string {
 	base := lipgloss.NewStyle().Background(t.Background).Foreground(t.Foreground)
 	var before, after []rune
@@ -315,6 +317,8 @@ func insertStyledLine(line string, col, cover int, popup string) string {
 	vis := 0
 	i := 0
 	in := []rune(line)
+	var fg, bg string
+	restore := ""
 	for i < len(in) {
 		if in[i] == '\x1b' {
 			j := i + 1
@@ -327,6 +331,7 @@ func insertStyledLine(line string, col, cover int, popup string) string {
 			if j >= len(in) {
 				break
 			}
+			parseSGRState(string(in[i:j+1]), &fg, &bg)
 			switch part {
 			case 0:
 				before = append(before, in[i:j+1]...)
@@ -348,6 +353,7 @@ func insertStyledLine(line string, col, cover int, popup string) string {
 		vis++
 		i++
 		if part == 1 && vis == col+cover {
+			restore = sgrRestore(fg, bg)
 			part = 2
 		}
 	}
@@ -356,5 +362,50 @@ func insertStyledLine(line string, col, cover int, popup string) string {
 		// background cells so the popup block still lands at col.
 		return line + base.Render(strings.Repeat(" ", col-vis)) + popup
 	}
-	return string(before) + popup + repaintBare(after, base)
+	return string(before) + popup + restore + string(after)
+}
+
+// parseSGRState tracks the fg/bg truecolor state the terminal would be in
+// after seq, so a splice can restore the exact style that was active at a
+// given column. Non-SGR escapes are ignored.
+func parseSGRState(seq string, fg, bg *string) {
+	if len(seq) < 3 || seq[1] != '[' || seq[len(seq)-1] != 'm' {
+		return
+	}
+	params := strings.Split(seq[2:len(seq)-1], ";")
+	for i := 0; i < len(params); i++ {
+		switch params[i] {
+		case "0":
+			*fg, *bg = "", ""
+		case "39":
+			*fg = ""
+		case "49":
+			*bg = ""
+		case "38", "48":
+			if i+4 < len(params) && params[i+1] == "2" {
+				s := params[i] + ";2;" + params[i+2] + ";" + params[i+3] + ";" + params[i+4]
+				if params[i] == "38" {
+					*fg = s
+				} else {
+					*bg = s
+				}
+				i += 4
+			}
+		}
+	}
+}
+
+// sgrRestore builds an SGR sequence re-asserting the tracked fg/bg state, or
+// the empty string when both are default.
+func sgrRestore(fg, bg string) string {
+	switch {
+	case fg == "" && bg == "":
+		return ""
+	case bg == "":
+		return "\x1b[" + fg + "m"
+	case fg == "":
+		return "\x1b[" + bg + "m"
+	default:
+		return "\x1b[" + fg + ";" + bg + "m"
+	}
 }
