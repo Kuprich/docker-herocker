@@ -250,14 +250,12 @@ def drag_copies_selection_via_osc52(s):
     assert len(auto) > before, "drag release did not emit an OSC 52 copy"
     assert b"\n" in auto[-1], "selected text should span at least two lines"
 
-    # `y` re-copies the still-active selection
+    # the selection resets on release, so `y` right after is a no-op
     s.send(b"y"); time.sleep(0.05)
     s.drain(0.8)
-    recopy = payloads()
-    assert len(recopy) > len(auto), "y did not re-copy the selection"
-    assert recopy[-1] == auto[-1], "y re-copy payload differs from the drag copy"
+    assert len(payloads()) == len(auto), "y copied after the selection was reset on release"
 
-    # a plain click clears the selection; y must then be a no-op
+    # a plain click clears the (already reset) selection; y must stay a no-op
     s.send(b"\x1b[<0;15;22M"); time.sleep(0.05)
     s.send(b"\x1b[<0;15;22m"); s.drain(0.8)
     cnt = len(payloads())
@@ -284,12 +282,22 @@ def info_drag_selects_and_copies(s):
     s.send(b"\x1b[<0;40;22m")
     s.drain(0.8)
 
+    # the live highlight was emitted while dragging (allbuf accumulates the
+    # drag frames) and the copy fired
     assert sel_bg in s.allbuf.decode("utf-8", "replace"), \
         "Info drag did not highlight any row"
     payloads = [base64.b64decode(g) for g in osc52_re.findall(s.allbuf)]
     assert payloads and payloads[-1], "Info drag did not copy to the clipboard"
     assert any(ch.isprintable() for ch in payloads[-1].decode("utf-8", "replace")), \
         "Info clipboard payload looks empty"
+
+    # release resets the highlight immediately: a post-release repaint must
+    # carry no selection green
+    mark = len(s.allbuf)
+    s.send(b"\x1b[<64;90;22M"); time.sleep(0.05)   # wheel-up over the Info pane
+    s.drain(0.8)
+    assert sel_bg not in s.allbuf[mark:].decode("utf-8", "replace"), \
+        "Info highlight survived the release (selection must reset immediately)"
 
     # plain click clears the Info selection and must NOT re-copy
     cnt = len(payloads)
@@ -310,26 +318,28 @@ def selection_survives_log_refresh(s):
 
     sel_bg = "48;2;44;73;46"
 
-    # drag a selection over the log body
+    # drag a selection over the log body; the live highlight appears while
+    # dragging, then the release copies and resets it
+    mark = len(s.allbuf)
     s.send(b"\x1b[<0;15;22M"); time.sleep(0.05)   # press
     s.send(b"\x1b[<32;40;24M"); time.sleep(0.05)  # left-motion
     s.send(b"\x1b[<0;40;24m")                     # release
     s.drain(0.6)
-    assert sel_bg in s.allbuf.decode("utf-8", "replace"), \
-        "drag did not highlight log text"
+    assert sel_bg in s.allbuf[mark:].decode("utf-8", "replace"), \
+        "drag did not highlight log text while in flight"
 
-    # wait through several 500ms log-refresh ticks: the visible position must
-    # stay frozen (no follow/AtBottom snap) so the highlight cannot scroll off
+    # wait through several 500ms log-refresh ticks: the reset selection must
+    # never re-emerge, and the visible position stays frozen (no follow snap)
     s.drain(1.2)
 
     # force a repaint of the log band via a wheel event; the freshly emitted
-    # rows must still carry the selection highlight
+    # rows must carry no highlight (immediate reset on release)
     mark = len(s.allbuf)
     s.send(b"\x1b[<64;15;22M"); time.sleep(0.05)   # wheel-up over the log body
     s.drain(0.8)
     tail = s.allbuf[mark:].decode("utf-8", "replace")
-    assert sel_bg in tail, \
-        "selection highlight lost after log refresh ticks (follow snapped it off-screen)"
+    assert sel_bg not in tail, \
+        "stale selection highlight after refresh ticks (selection must reset immediately on release)"
 
 
 @check
@@ -345,6 +355,7 @@ def slow_drag_survives_log_refresh(s):
     # A slow drag: a ~0.9s pause mid-drag lets at least one 500ms log-refresh
     # tick (a full identical reload for a quiet container) land while the
     # button is still held. That reload must not destroy the in-flight drag.
+    mark = len(s.allbuf)
     s.send(b"\x1b[<0;15;22M"); time.sleep(0.05)   # press
     s.send(b"\x1b[<32;30;23M"); time.sleep(0.05)  # motion
     time.sleep(0.9)                               # slow movement -> tick lands
@@ -353,14 +364,16 @@ def slow_drag_survives_log_refresh(s):
     s.send(b"\x1b[<0;60;25m")                     # release
     s.drain(0.8)
 
-    # force a repaint of the log band; the freshly emitted rows must carry the
-    # highlight even after the mid-drag refresh tick
+    # the mid-drag tick must not have killed the live highlight, and the
+    # release must then have reset it: the next repaint shows nothing
+    assert sel_bg in s.allbuf[mark:].decode("utf-8", "replace"), \
+        "live drag highlight never emitted (refresh tick destroyed the drag?)"
     mark = len(s.allbuf)
     s.send(b"\x1b[<64;60;25M"); time.sleep(0.05)   # wheel-over the log body
     s.drain(0.8)
     tail = s.allbuf[mark:].decode("utf-8", "replace")
-    assert sel_bg in tail, \
-        "slow drag lost the selection when a log-refresh tick landed mid-drag"
+    assert sel_bg not in tail, \
+        "stale highlight after release (selection must reset immediately)"
 
 
 @check

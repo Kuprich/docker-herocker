@@ -782,15 +782,12 @@ func (m Model) renderContainerDetail(w, bottomH int) string {
 	m.detailViewport.Width = w - 1
 	m.detailViewport.Height = vh
 
-	// Re-decorate the stored styled body with a live Info selection, if any.
-	// The span is mapped from the plain body coordinates and only the exact
-	// [from,to] range gets the highlight, mirroring the Logs pane.
-	sel := m.detailSel
-	if m.detailDragSel && !sel.active {
-		sel.active = true
-	}
 	content := m.detailStyled
-	if sel.active {
+	if m.detailDragSel {
+		// Live highlight only while the drag is in flight: the selection is
+		// cleared on release, so the stored body never gets re-decorated.
+		sel := m.detailSel
+		sel.active = true
 		content = decorateSelection(content, m.detailContent, sel)
 	}
 	m.detailViewport.SetContent(content)
@@ -1236,8 +1233,10 @@ func (m Model) renderSubLogView(w, bottomH int) string {
 	)
 
 	sel := m.logSel
-	if m.dragSel && !sel.active {
-		sel.active = true // live highlight while the drag is in flight
+	if m.dragSel {
+		// Live highlight only while the drag is in flight: the selection is
+		// cleared on release, so the band renders unstyled the rest of the time.
+		sel.active = true
 	}
 	m.containerLogViewport.Width = w - 1              // viewport shares the pane with the scrollbar column
 	m.containerLogViewport.Height = max(bottomH-3, 1) // header + separator + blank gap row
@@ -1612,33 +1611,44 @@ func (m Model) detailScreenToCell(x, y int, clamp bool) (row, col int, ok bool) 
 }
 
 // finishDetailSelection finalizes an in-flight Info drag, mirroring
-// finishLogSelection: click leaves it inactive, a real drag auto-copies.
+// finishLogSelection: click leaves it inactive, a real drag copies the plain
+// span to the clipboard via OSC 52 and immediately clears the highlight.
 func (m *Model) finishDetailSelection(x, y int) tea.Cmd {
 	m.detailDragSel = false
 	if r, c, ok := m.detailScreenToCell(x, y, true); ok {
 		m.detailSel.endR, m.detailSel.endC = r, c
 	}
-	m.detailSel.active = !m.detailSel.isTrivial()
-	if m.detailSel.active {
-		return osc52Copy(selectedText(m.detailContent, m.detailSel))
-	}
-	return nil
+	cmd := osc52CopyText(m.detailContent, m.detailSel)
+	m.detailSel = textSel{}
+	return cmd
 }
 
 // finishLogSelection finalizes an in-flight drag: the endpoint snaps to the
-// nearest content cell and a click (no movement) leaves the selection
-// inactive so a plain click clears a previous highlight. A non-trivial drag
-// auto-copies the selected text to the host clipboard via OSC 52.
+// nearest content cell and a click (no movement) leaves the selection cleared
+// so a plain click clears a previous highlight. A non-trivial drag copies the
+// selected text to the host clipboard via OSC 52, then immediately drops the
+// highlight.
 func (m *Model) finishLogSelection(x, y int) tea.Cmd {
 	m.dragSel = false
 	if r, c, ok := m.logScreenToCell(x, y, true); ok {
 		m.logSel.endR, m.logSel.endC = r, c
 	}
-	m.logSel.active = !m.logSel.isTrivial()
-	if m.logSel.active {
-		return osc52Copy(m.selectionText())
+	cmd := osc52CopyText(m.containerLogContent, m.logSel)
+	m.logSel = textSel{}
+	return cmd
+}
+
+// osc52CopyText copies the given plain span to the host clipboard via OSC 52
+// when it covers a non-trivial span. It distinguishes a real drag (anchor !=
+// endpoint, e.g. an in-flight drag whose live highlight hasn't flipped active
+// yet) from a plain click (anchor == endpoint), so a click never emits a
+// sequence. The caller is responsible for clearing the selection afterwards.
+func osc52CopyText(content string, sel textSel) tea.Cmd {
+	if sel.isTrivial() {
+		return nil
 	}
-	return nil
+	sel.active = true // selectedText only yields text for an active span
+	return osc52Copy(selectedText(content, sel))
 }
 
 // selectionText returns the plain (ANSI-stripped) text currently selected in

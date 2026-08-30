@@ -904,15 +904,11 @@ func TestInfoDragSelectsAndCopies(tt *testing.T) {
 		tt.Errorf("Info drag end col = %d out of row bounds", next.detailSel.endC)
 	}
 	next, cmd := testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 30, Y: 22})
-	if !next.detailSel.active {
-		tt.Fatal("release should finalize the Info selection")
+	if next.detailSel.active {
+		tt.Fatal("release should clear the Info selection (text was copied)")
 	}
 	if cmd == nil {
 		tt.Error("non-trivial Info drag should auto-copy via OSC 52")
-	}
-	// the copied text must equal the selected plain span
-	if got := selectedText(next.detailContent, next.detailSel); got == "" {
-		tt.Error("Info selection covers no text")
 	}
 
 	// a plain click clears the Info selection
@@ -1185,16 +1181,15 @@ func TestLogDragSelectsAcrossRows(tt *testing.T) {
 	}
 
 	release := tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 4, Y: 23}
-	next = testMouseUpdate(next, release)
+	next, cmd := testUpdate(next, release)
 	if next.dragSel {
 		tt.Error("release should end the drag")
 	}
-	if !next.logSel.active {
-		tt.Error("drag should finalize an active selection")
+	if next.logSel.active {
+		tt.Error("release should clear the highlight (text was copied)")
 	}
-	want := "beta\ngamma\ndelt"
-	if got := selectedText(next.containerLogContent, next.logSel); got != want {
-		tt.Errorf("selectedText = %q, want %q", got, want)
+	if cmd == nil {
+		tt.Error("non-trivial drag should auto-copy via OSC 52")
 	}
 }
 
@@ -1330,12 +1325,12 @@ func TestLogSlowDragSurvivesIdenticalReload(tt *testing.T) {
 	if next.logSel.endR != 3 {
 		tt.Errorf("motion after tick end row = %d, want 3", next.logSel.endR)
 	}
-	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 4, Y: 23})
-	if !next.logSel.active {
-		tt.Error("release after a surviving drag should finalize an active selection")
+	next, cmd := testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 4, Y: 23})
+	if next.logSel.active {
+		tt.Error("release should clear the highlight (text was copied)")
 	}
-	if want := "beta\ngamma\ndelt"; selectedText(next.containerLogContent, next.logSel) != want {
-		tt.Errorf("selectedText = %q, want %q", selectedText(next.containerLogContent, next.logSel), want)
+	if cmd == nil {
+		tt.Error("surviving drag release should auto-copy")
 	}
 }
 
@@ -1376,8 +1371,8 @@ func TestLogReleaseAutoCopiesSelection(tt *testing.T) {
 	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21})
 	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 23})
 	next, cmd := testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 4, Y: 23})
-	if !next.logSel.active {
-		tt.Fatal("release of a real drag should finalize an active selection")
+	if next.logSel.active {
+		tt.Fatal("release of a real drag should clear the selection (text was copied)")
 	}
 	if cmd == nil {
 		tt.Error("non-trivial release should return an OSC 52 copy command")
@@ -1393,13 +1388,14 @@ func TestLogReleaseAutoCopiesSelection(tt *testing.T) {
 	}
 }
 
-func TestCopyKeyRecopiesSelection(tt *testing.T) {
+func TestCopyKeyCopiesFinalizedSelection(tt *testing.T) {
 	m := logTestModel()
 	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21})
 	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 22})
-	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 4, Y: 22})
+	// a lost release (timeout) keeps the selection active so y can copy it
+	next, _ = testUpdate(next, dragTimeoutMsg{gen: next.dragGen})
 	if !next.logSel.active {
-		tt.Fatal("expected an active selection before re-copy")
+		tt.Fatal("timed-out drag should keep an active selection for a manual copy")
 	}
 	keyY := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")}
 	if _, cmd := testUpdate(next, keyY); cmd == nil {
@@ -1408,6 +1404,16 @@ func TestCopyKeyRecopiesSelection(tt *testing.T) {
 	next.logSel = textSel{}
 	if _, cmd := testUpdate(next, keyY); cmd != nil {
 		tt.Error("y without a selection should return no command")
+	}
+	// a completed drag resets immediately: y right after must be a no-op
+	next2 := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21})
+	next2 = testMouseUpdate(next2, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 22})
+	next2 = testMouseUpdate(next2, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 4, Y: 22})
+	if next2.logSel.active {
+		tt.Fatal("completed drag should have cleared the selection")
+	}
+	if _, cmd := testUpdate(next2, keyY); cmd != nil {
+		tt.Error("y after a completed drag must not copy (selection reset)")
 	}
 }
 
@@ -1470,17 +1476,18 @@ func TestLogSelectionSurvivesScroll(tt *testing.T) {
 	m := logTestModel()
 	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21}
 	motion := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 23}
-	release := tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 4, Y: 23}
-	m = testMouseUpdate(testMouseUpdate(testMouseUpdate(m, press), motion), release)
-	if want := "beta\ngamma\ndelt"; selectedText(m.containerLogContent, m.logSel) != want {
-		tt.Fatalf("pre-scroll selectedText = %q, want %q", selectedText(m.containerLogContent, m.logSel), want)
+	m = testMouseUpdate(testMouseUpdate(m, press), motion)
+	// a lost release (timeout) leaves the buffer-anchored selection active
+	next, _ := testUpdate(m, dragTimeoutMsg{gen: m.dragGen})
+	if want := "beta\ngamma\ndelt"; selectedText(next.containerLogContent, next.logSel) != want {
+		tt.Fatalf("pre-scroll selectedText = %q, want %q", selectedText(next.containerLogContent, next.logSel), want)
 	}
 
-	m.containerLogViewport.SetContent(strings.Repeat("filler\n", 30))
-	m.containerLogViewport.YOffset = 10
+	next.containerLogViewport.SetContent(strings.Repeat("filler\n", 30))
+	next.containerLogViewport.YOffset = 10
 	// selection rows are buffer-anchored, not screen-anchored, so the
 	// selected text is unchanged even though the view moved
-	if got := selectedText(m.containerLogContent, m.logSel); got != "beta\ngamma\ndelt" {
+	if got := selectedText(next.containerLogContent, next.logSel); got != "beta\ngamma\ndelt" {
 		tt.Errorf("post-scroll selectedText = %q, want %q (selection drifted)", got, "beta\ngamma\ndelt")
 	}
 }
