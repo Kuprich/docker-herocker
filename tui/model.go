@@ -140,6 +140,7 @@ type Model struct {
 	detailViewport       viewport.Model
 	detailSel            textSel
 	detailDragSel        bool
+	dragGen              uint64 // bumped on every drag start/release; guards stale timers
 	detailContent        string // plain (ANSI-stripped) Info body, selection buffer geometry
 	detailStyled         string // styled Info body, re-decorated per render when selected
 }
@@ -180,6 +181,16 @@ type logRefreshTickMsg struct{}
 
 func logRefreshTicker() tea.Cmd {
 	return tea.Tick(logRefreshInterval, func(time.Time) tea.Msg { return logRefreshTickMsg{} })
+}
+
+// dragTimeoutMsg fires when an in-flight drag has gone quiet for dragTimeout;
+// its gen field must match m.dragGen or the event belongs to a newer drag.
+type dragTimeoutMsg struct{ gen uint64 }
+
+// dragTimer finalizes a stale drag if no further mouse events arrive within
+// dragTimeout. Re-arming it on every drag event keeps pauses from tripping it.
+func dragTimer(gen uint64) tea.Cmd {
+	return tea.Tick(dragTimeout, func(time.Time) tea.Msg { return dragTimeoutMsg{gen: gen} })
 }
 
 // innerW returns the content width available to all renderers inside the
@@ -313,6 +324,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd = tea.Batch(cmd, m.autoRefreshLogs())
 		}
 		return m, cmd
+
+	case dragTimeoutMsg:
+		// A stale timer from an old drag must never finalize a newer one.
+		if msg.gen != m.dragGen {
+			return m, nil
+		}
+		// A release was lost (drag ended outside the terminal, focus loss):
+		// snap the in-flight drag into a final selection. Deliberately no
+		// auto-copy — the user never completed the gesture.
+		switch {
+		case m.dragSel:
+			m.dragSel = false
+			m.logSel.active = !m.logSel.isTrivial()
+		case m.detailDragSel:
+			m.detailDragSel = false
+			m.detailSel.active = !m.detailSel.isTrivial()
+		}
+		return m, nil
 
 	case containerMsg:
 		m.containers = msg
@@ -458,22 +487,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					switch {
 					case leftDown:
 						if r, c, ok := m.logScreenToCell(msg.X, msg.Y, false); ok {
+							m.dragGen++
 							m.logSel = textSel{anR: r, anC: c, endR: r, endC: c}
+							return m, dragTimer(m.dragGen)
 						}
 					case leftMove:
 						if r, c, ok := m.logScreenToCell(msg.X, msg.Y, true); ok {
 							m.logSel.endR, m.logSel.endC = r, c
 						}
+						m.dragGen++
+						return m, dragTimer(m.dragGen)
 					case up:
+						m.dragGen++
 						return m, m.finishLogSelection(msg.X, msg.Y)
 					}
 					return m, nil
 				}
 				if leftDown {
 					if r, c, ok := m.logScreenToCell(msg.X, msg.Y, false); ok {
+						m.dragGen++
 						m.dragSel = true
 						m.logSel = textSel{anR: r, anC: c, endR: r, endC: c}
-						return m, nil
+						return m, dragTimer(m.dragGen)
 					}
 					// Header, sub-tab strip or scrollbar column: act as a click.
 					return m.handleClick(msg.X, msg.Y)
@@ -496,22 +531,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					switch {
 					case leftDown:
 						if r, c, ok := m.detailScreenToCell(msg.X, msg.Y, false); ok {
+							m.dragGen++
 							m.detailSel = textSel{anR: r, anC: c, endR: r, endC: c}
+							return m, dragTimer(m.dragGen)
 						}
 					case leftMove:
 						if r, c, ok := m.detailScreenToCell(msg.X, msg.Y, true); ok {
 							m.detailSel.endR, m.detailSel.endC = r, c
 						}
+						m.dragGen++
+						return m, dragTimer(m.dragGen)
 					case up:
+						m.dragGen++
 						return m, m.finishDetailSelection(msg.X, msg.Y)
 					}
 					return m, nil
 				}
 				if leftDown {
 					if r, c, ok := m.detailScreenToCell(msg.X, msg.Y, false); ok {
+						m.dragGen++
 						m.detailDragSel = true
 						m.detailSel = textSel{anR: r, anC: c, endR: r, endC: c}
-						return m, nil
+						return m, dragTimer(m.dragGen)
 					}
 					return m.handleClick(msg.X, msg.Y)
 				}

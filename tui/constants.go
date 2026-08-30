@@ -25,6 +25,13 @@ const (
 	// happens instead of a potentially huge since-based catch-up.
 	logResyncGap = 5 * time.Second
 
+	// dragTimeout finalizes an in-flight text drag when no mouse event has
+	// arrived for its duration. The tick is re-armed on every press/motion,
+	// so only a genuinely lost release (drag ending outside the terminal,
+	// focus loss) trips it. A timed-out drag becomes a normal selection but
+	// is never auto-copied.
+	dragTimeout = 2 * time.Second
+
 	// logMaxWrappedLines caps the pre-wrapped Logs pane buffer so
 	// incremental appends cannot grow it without bound.
 	logMaxWrappedLines = 4000

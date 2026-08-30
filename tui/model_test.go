@@ -1441,3 +1441,88 @@ func TestViewHeightMatchesTerminal(tt *testing.T) {
 		}
 	})
 }
+
+// TestLogDragTimeoutFinalizes does the manual release never arrive
+// (lost focus / drag ended outside the terminal), a stale in-flight drag
+// must be snapped into a final selection WITHOUT auto-copying.
+func TestLogDragTimeoutFinalizes(tt *testing.T) {
+	m := logTestModel()
+	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21}
+	next := testMouseUpdate(m, press)
+	if !next.dragSel {
+		tt.Fatal("press should start a drag")
+	}
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 23})
+
+	next, cmd := testUpdate(next, dragTimeoutMsg{gen: next.dragGen})
+	if next.dragSel {
+		tt.Error("timeout should end the in-flight drag")
+	}
+	if !next.logSel.active {
+		tt.Error("timeout should finalize the selection")
+	}
+	if cmd != nil {
+		tt.Error("timed-out drag must not auto-copy")
+	}
+	if want := "beta\ngamma\ndelt"; selectedText(next.containerLogContent, next.logSel) != want {
+		tt.Errorf("finalized text = %q, want %q", selectedText(next.containerLogContent, next.logSel), want)
+	}
+}
+
+// TestDragTimeoutStaleGenIgnored proves a timer from an outlived drag
+// generation cannot kill a fresher drag.
+func TestDragTimeoutStaleGenIgnored(tt *testing.T) {
+	m := logTestModel()
+	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21}
+	next := testMouseUpdate(m, press)
+	gen0 := next.dragGen
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 23})
+
+	if _, cmd := testUpdate(next, dragTimeoutMsg{gen: gen0}); cmd != nil {
+		tt.Error("stale timeout returned a cmd")
+	}
+	if !next.dragSel {
+		tt.Fatal("stale timeout must not touch a newer drag")
+	}
+
+	// the correctly-generated timer still finalizes it
+	next, cmd := testUpdate(next, dragTimeoutMsg{gen: next.dragGen})
+	if next.dragSel || !next.logSel.active {
+		tt.Error("matching timeout should finalize the drag")
+	}
+	if cmd != nil {
+		tt.Error("matching timeout must not auto-copy")
+	}
+
+	// a plain release after finalization still ends any new drag normally
+	next = testMouseUpdate(detailTestModel(), tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 20})
+	next, cmd = testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 1, Y: 20})
+	if cmd != nil || next.detailDragSel {
+		tt.Error("plain Info click must not copy or leave a drag")
+	}
+}
+
+// TestInfoDragTimeoutFinalizes mirrors the Logs timeout for the Info pane.
+func TestInfoDragTimeoutFinalizes(tt *testing.T) {
+	m := detailTestModel()
+	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 20}
+	next := testMouseUpdate(m, press)
+	if !next.detailDragSel {
+		tt.Fatal("press in the Info body should start a drag")
+	}
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 30, Y: 22})
+
+	next, cmd := testUpdate(next, dragTimeoutMsg{gen: next.dragGen})
+	if next.detailDragSel {
+		tt.Error("timeout should end the in-flight Info drag")
+	}
+	if !next.detailSel.active {
+		tt.Error("timeout should finalize the Info selection")
+	}
+	if cmd != nil {
+		tt.Error("timed-out Info drag must not auto-copy")
+	}
+	if selectedText(next.detailContent, next.detailSel) == "" {
+		tt.Error("finalized Info selection covers no text")
+	}
+}
