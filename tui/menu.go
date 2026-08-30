@@ -125,7 +125,7 @@ func containerDisplayName(c docker.Container) string {
 func (m Model) buildContainerMenu() popupMenu {
 	c := m.containers[m.selectedIdx]
 	items := m.containerMenuItems(c)
-	header := "Действия с контейнером " + containerDisplayName(c)
+	header := "Actions for container " + containerDisplayName(c)
 	w, h := menuMeasure(items, header)
 	return popupMenu{
 		items:  items,
@@ -156,7 +156,7 @@ func menuMeasure(items []menuItem, header string) (w, h int) {
 	w += 3 // inside padding: one leading indent cell per text row + filler
 	h = len(items) + 2
 	if header != "" {
-		h++
+		h += 2 // title row + horizontal separator below it
 	}
 	return w, h
 }
@@ -170,6 +170,7 @@ func (m Model) renderContainerMenu() []string {
 	rows := []string{MenuBoxStyle.Render("┌" + strings.Repeat("─", iw) + "┐")}
 	if m.menu.header != "" {
 		rows = append(rows, MenuBoxStyle.Render("│"+padMenuRunes(" "+m.menu.header, iw)+"│"))
+		rows = append(rows, MenuBoxStyle.Render("│"+strings.Repeat("─", iw)+"│"))
 	}
 	for i, it := range m.menu.items {
 		style := MenuItemStyle
@@ -262,7 +263,7 @@ func (m Model) handleMenuMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 			sy >= m.menu.y && sy < m.menu.y+m.menu.h {
 			item := sy - m.menu.y - 1 // below the top border
 			if m.menu.header != "" {
-				item--
+				item -= 2 // title row + the horizontal separator below it
 			}
 			if item >= 0 && item < len(m.menu.items) {
 				m.menu.sel = item

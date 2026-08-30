@@ -432,7 +432,7 @@ def right_click_does_not_open_menu(s):
     s.drain(0.6)
     tail = s.allbuf[mark:].decode("utf-8", "replace")
     assert "Remove with data" not in tail, "right-click still opens the popup"
-    assert "Действия с контейнером" not in tail, "right-click still opens the popup title"
+    assert "Actions for container" not in tail, "right-click still opens the popup title"
 
     # the list stays interactive: a wheel-down still moves the selection and
     # redraws the highlighted row (44;73;46 is the selected-row background)
@@ -449,18 +449,18 @@ def x_key_opens_context_menu(s):
     s.drain(3.0)
 
     # x opens the popup centered on the screen for the selected container,
-    # with the "Действия с контейнером <name>" title
+    # with the "Actions for container <name>" title
     mark = len(s.allbuf)
     s.send(b"x"); time.sleep(0.05)
     s.drain(0.8)
     tail = s.allbuf[mark:].decode("utf-8", "replace")
     assert re.search(r"\x1b\[[0-9;]*48;2;46;160;67[0-9;]*m +(Start|Stop)", tail), \
         "x key did not render an active Start/Stop menu row"
-    assert "Действия с контейнером" in tail, "x key menu lacks its title"
+    assert "Actions for container" in tail, "x key menu lacks its title"
     assert "Remove with data" in tail, "x key menu lacks the Remove with data item"
     # the title row carries the box border to its left, so it must not start at
     # column 0: the popup is centered, not left-anchored
-    assert "│ Действия с контейнером" in tail, "popup title is not inside a centered box"
+    assert "│ Actions for container" in tail, "popup title is not inside a centered box"
 
     # Esc closes; j moves to the next row, and x reopens there
     s.send(b"\x1b"); time.sleep(0.05)
@@ -473,7 +473,7 @@ def x_key_opens_context_menu(s):
     tail = s.allbuf[mark:].decode("utf-8", "replace")
     assert re.search(r"\x1b\[[0-9;]*48;2;46;160;67[0-9;]*m +(Start|Stop)", tail), \
         "x after j did not reopen the popup"
-    assert "Действия с контейнером" in tail, "x after j menu lacks its title"
+    assert "Actions for container" in tail, "x after j menu lacks its title"
     assert "Remove with data" in tail, "x after j menu lacks the Remove with data item"
 
     # Esc closes; a forced repaint must carry no menu labels
@@ -483,7 +483,7 @@ def x_key_opens_context_menu(s):
     s.drain(0.8)
     tail = s.allbuf[mark:].decode("utf-8", "replace")
     assert "Remove with data" not in tail, "x key menu survived Esc"
-    assert "Действия с контейнером" not in tail, "x key menu title survived Esc"
+    assert "Actions for container" not in tail, "x key menu title survived Esc"
 
 
 @check

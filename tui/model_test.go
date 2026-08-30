@@ -1719,30 +1719,34 @@ func TestRenderContainerMenuShape(tt *testing.T) {
 			tt.Errorf("menu row width = %d, want %d: %q", lipgloss.Width(r), m.menu.w, stripANSI(r))
 		}
 	}
-	wantTitle := "Действия с контейнером " + containerDisplayName(m.containers[0])
+	wantTitle := "Actions for container " + containerDisplayName(m.containers[0])
 	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[1]), "│")); got != wantTitle {
 		tt.Errorf("title = %q, want %q", got, wantTitle)
 	}
-	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[2]), "│")); got != "Stop" {
+	// the title is separated from the actions by a full-width horizontal rule
+	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[2]), "│")); strings.ReplaceAll(got, "─", "") != "" {
+		tt.Errorf("separator row = %q, want a full-width ─ rule", got)
+	}
+	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[3]), "│")); got != "Stop" {
 		tt.Errorf("first item = %q, want a Stop row for a running container", got)
 	}
-	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[3]), "│")); got != "Remove" {
+	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[4]), "│")); got != "Remove" {
 		tt.Errorf("second item = %q, want Remove", got)
 	}
-	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[4]), "│")); got != "Remove with data" {
+	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[5]), "│")); got != "Remove with data" {
 		tt.Errorf("third item = %q, want Remove with data", got)
 	}
 
 	// the selected row (sel=0) is inverted with the accent background; the
 	// other rows are not
 	activeBG := ";48;2;46;160;67m"
-	if !strings.Contains(rows[2], activeBG) {
+	if !strings.Contains(rows[3], activeBG) {
 		tt.Error("selected menu row must carry the accent background")
 	}
-	if strings.Contains(rows[3], activeBG) {
+	if strings.Contains(rows[4], activeBG) {
 		tt.Error("unselected menu row must not carry the accent background")
 	}
-	if strings.Contains(rows[4], activeBG) {
+	if strings.Contains(rows[5], activeBG) {
 		tt.Error("unselected menu row must not carry the accent background")
 	}
 
@@ -1770,13 +1774,16 @@ func TestRenderContainerMenuShape(tt *testing.T) {
 	if got := strings.TrimSpace(strings.Trim(stripANSI(crows[1]), "│")); got != wantHeader {
 		tt.Errorf("confirm header = %q, want %q", got, wantHeader)
 	}
-	if got := strings.TrimSpace(strings.Trim(stripANSI(crows[2]), "│")); got != "Yes, remove" {
+	if got := strings.TrimSpace(strings.Trim(stripANSI(crows[2]), "│")); strings.ReplaceAll(got, "─", "") != "" {
+		tt.Errorf("confirm separator row = %q, want a full-width ─ rule", got)
+	}
+	if got := strings.TrimSpace(strings.Trim(stripANSI(crows[3]), "│")); got != "Yes, remove" {
 		tt.Errorf("confirm yes = %q", got)
 	}
-	if !strings.Contains(crows[2], activeBG) {
+	if !strings.Contains(crows[3], activeBG) {
 		tt.Error("confirm resets the cursor to the first (Yes, remove) item")
 	}
-	if got := strings.TrimSpace(strings.Trim(stripANSI(crows[3]), "│")); got != "No, cancel" {
+	if got := strings.TrimSpace(strings.Trim(stripANSI(crows[4]), "│")); got != "No, cancel" {
 		tt.Errorf("confirm no = %q", got)
 	}
 
@@ -1791,7 +1798,7 @@ func TestRenderContainerMenuShape(tt *testing.T) {
 	if got := strings.TrimSpace(strings.Trim(stripANSI(drows[1]), "│")); got != wantDataHeader {
 		tt.Errorf("data-confirm header = %q, want %q", got, wantDataHeader)
 	}
-	if !strings.Contains(drows[2], activeBG) {
+	if !strings.Contains(drows[3], activeBG) {
 		tt.Error("data-confirm resets the cursor to the first (Yes, remove) item")
 	}
 }
@@ -1900,9 +1907,9 @@ func TestMenuClickOutsideCloses(tt *testing.T) {
 	m.fitViewports()
 	m = openMenuFor(m, 0)
 
-	// left-click on the Remove item (title row + one item above it, plus the
-	// top border) activates it and keeps the popup open in the confirm stage
-	itemY := m.menu.y + 3 + 1 // 0-based row -> 1-based mouse Y
+	// left-click on the Remove item (title + separator above it, plus the top
+	// border) activates it and keeps the popup open in the confirm stage
+	itemY := m.menu.y + 4 + 1 // 0-based row -> 1-based mouse Y
 	itemX := m.menu.x + 3 + 1
 	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: itemX, Y: itemY})
 	if !next.menuOpen {
@@ -2041,7 +2048,7 @@ func TestKeyXOpensContextMenu(tt *testing.T) {
 	if got := next.menu.items[2].label; got != "Remove with data" {
 		tt.Errorf("third item = %q", got)
 	}
-	if got := next.menu.header; got != "Действия с контейнером test-container-2" {
+	if got := next.menu.header; got != "Actions for container test-container-2" {
 		tt.Errorf("menu title = %q", got)
 	}
 	// the popup is centered on the screen, clear of the tab bar
@@ -2067,7 +2074,7 @@ func TestKeyXOpensContextMenu(tt *testing.T) {
 	if !next.menuOpen {
 		tt.Fatal("x after k should open the popup")
 	}
-	if got := next.menu.header; got != "Действия с контейнером test-container-1" {
+	if got := next.menu.header; got != "Actions for container test-container-1" {
 		tt.Errorf("menu title after k = %q", got)
 	}
 	if want := max((next.width-next.menu.w)/2, 0); next.menu.x != want {
