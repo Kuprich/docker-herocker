@@ -573,22 +573,48 @@ func (m Model) View() string {
 		Background(t.Background).
 		Padding(0, appMarginX).
 		Render(content)
-	return lipgloss.Place(m.width, m.height,
+	content = lipgloss.Place(m.width, m.height,
 		lipgloss.Top, lipgloss.Left,
 		content,
 		lipgloss.WithWhitespaceBackground(t.Background),
 	)
+	// View() must not be taller than the terminal: an extra row scrolls the
+	// visible content by one and silently shifts mouse→buffer coordinates.
+	if lines := strings.Split(content, "\n"); len(lines) > m.height {
+		content = strings.Join(lines[:m.height], "\n")
+	}
+	return content
 }
 
 // ---- render helpers ----
 
 func (m Model) renderHelpBar() string {
 	cw := innerW(m.width)
-	if m.helpOn {
-		return HelpBarStyle.Width(cw).Render(m.help.View(keys))
+	// HelpBarStyle pads 1 col per side, so the wrap budget is cw-2.
+	inner := cw - 2
+	if inner < 1 {
+		inner = 1
 	}
-	h := " 1-4  tabs  •  ↑/↓  navigate  •  ←/→  Info/Logs  •  Space  start/stop  •  r  restart  •  a  all  •  y  copy  •  ?  help  •  Shift+drag  select"
-	return HelpBarStyle.Width(cw).Render(h)
+	if m.helpOn {
+		return HelpBarStyle.Width(cw).Render(fitRunes(m.help.View(keys), inner))
+	}
+	// Short enough that the bar never wraps to a second row: a wrapped help
+	// bar makes View() one line taller than the terminal, scrolling every
+	// visible row up by one and desyncing mouse coordinates from selection.
+	h := " 1-4 tabs • ↑/↓ navigate • ←/→ Info/Logs • Space start/stop • r restart • a all • y copy • ? help • Shift+drag select"
+	return HelpBarStyle.Width(cw).Render(fitRunes(h, inner))
+}
+
+// fitRunes trims s to at most max runes, ending with an ellipsis.
+func fitRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	if max <= 1 {
+		return "…"
+	}
+	return string(r[:max-1]) + "…"
 }
 
 func (m Model) renderTabBar() string {

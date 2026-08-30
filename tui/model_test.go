@@ -1420,3 +1420,24 @@ func TestLogSelectionSurvivesScroll(tt *testing.T) {
 		tt.Errorf("post-scroll selectedText = %q, want %q (selection drifted)", got, "beta\ngamma\ndelt")
 	}
 }
+
+// TestViewHeightMatchesTerminal guards against any component that wraps or
+// overflows: if View() is taller than the terminal, the visible content
+// scrolls by one row and mouse→buffer coordinates silently shift.
+func TestViewHeightMatchesTerminal(tt *testing.T) {
+	withTrueColor(tt, func() {
+		for _, cfg := range [][2]int{{24, 130}, {30, 130}, {30, 140}, {36, 160}, {20, 80}, {40, 100}} {
+			h, w := cfg[0], cfg[1]
+			m := detailTestModel()
+			m.height = h
+			m.width = w
+			m.fitViewports()
+			if n := len(strings.Split(m.View(), "\n")); n != h {
+				tt.Errorf("h=%d w=%d: View() rows=%d, want %d", h, w, n, h)
+			}
+			if n := len(strings.Split(stripANSI(m.renderHelpBar()), "\n")); n != 1 {
+				tt.Errorf("h=%d w=%d: help bar rows=%d, want 1", h, w, n)
+			}
+		}
+	})
+}
