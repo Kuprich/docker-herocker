@@ -2017,6 +2017,62 @@ func TestMenuRemoveFlows(tt *testing.T) {
 	}
 }
 
+func TestKeyXOpensContextMenu(tt *testing.T) {
+	m := detailTestModel()
+	m.containers = makeTestContainers(3)
+	m.fitViewports()
+	m.selectedIdx = 2
+
+	x := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}
+
+	next, cmd := testUpdate(m, x)
+	if !next.menuOpen {
+		tt.Fatal("x should open the popup on the selected row")
+	}
+	if next.selectedIdx != 2 {
+		tt.Errorf("x changed the selection to %d", next.selectedIdx)
+	}
+	if cmd != nil {
+		tt.Error("x must not dispatch an action")
+	}
+	if got := next.menu.items[0].label; got != "Start" {
+		tt.Errorf("first item = %q, want Start for the restarting container", got)
+	}
+	if got := next.menu.items[2].label; got != "Remove with data" {
+		tt.Errorf("third item = %q", got)
+	}
+	// the popup anchors on the selected row where it really renders
+	if want := next.visibleRowY(next.selectedIdx) - 1; next.menu.y != want {
+		tt.Errorf("popup y = %d, want %d (selected row)", next.menu.y, want)
+	}
+
+	// x while the popup is open closes it (stray key), without dispatching
+	next, _ = testUpdate(next, x)
+	if next.menuOpen {
+		tt.Fatal("x while a popup is open should close it")
+	}
+
+	// j/k move the selection; x then anchors on the new row
+	next, _ = testUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	if next.selectedIdx != 1 {
+		tt.Fatalf("k = %d, want 1", next.selectedIdx)
+	}
+	next, _ = testUpdate(next, x)
+	if !next.menuOpen {
+		tt.Fatal("x after k should open the popup")
+	}
+	if want := next.visibleRowY(1) - 1; next.menu.y != want {
+		tt.Errorf("popup y after k = %d, want %d", next.menu.y, want)
+	}
+
+	// x on another tab must not open the popup
+	m.activeTab = tabImages
+	next, _ = testUpdate(m, x)
+	if next.menuOpen {
+		tt.Fatal("x must not open the popup outside the Containers tab")
+	}
+}
+
 func TestTabBarToastBadge(tt *testing.T) {
 	m := detailTestModel()
 	m.copyToast = false

@@ -285,6 +285,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			oldIdx := m.selectedIdx
 			m.moveDown()
 			return m, m.selectionChangedCmds(oldIdx)
+		case key.Matches(msg, keys.Menu):
+			m.openContextMenu()
+			return m, nil
 		case key.Matches(msg, keys.ToggleAll):
 			m.showAll = !m.showAll
 			return m, m.refreshNow()
@@ -1814,6 +1817,25 @@ func (m Model) tableRowAt(y int) (int, bool) {
 		return 0, false
 	}
 	return rowY, true
+}
+
+// visibleRowY returns the 1-based screen row the container-list index i is
+// actually drawn on (the inverse of tableRowAt, matching where
+// renderContainerList emits header, separator and rows). It anchors the
+// keyboard-opened context menu (x) on the selected row the same way the
+// mouse right-click does.
+func (m Model) visibleRowY(i int) int {
+	return tabBarHeight + 3 + i - m.mainYOff
+}
+
+// openContextMenu raises the container context menu (x / right-click) for the
+// currently selected row, mirroring the mouse path.
+func (m *Model) openContextMenu() {
+	if m.activeTab != tabContainers || m.selectedIdx < 0 || m.selectedIdx >= len(m.containers) {
+		return
+	}
+	m.menu = m.buildContainerMenu(appMarginX+1, m.visibleRowY(m.selectedIdx))
+	m.menuOpen = true
 }
 
 func (m Model) handleClick(x, y int) (Model, tea.Cmd) {

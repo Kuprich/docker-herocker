@@ -451,6 +451,41 @@ def right_click_opens_container_menu(s):
 
 
 @check
+def x_key_opens_context_menu(s):
+    s.drain(3.0)
+
+    # x opens the popup for the selected (first) container row
+    mark = len(s.allbuf)
+    s.send(b"x"); time.sleep(0.05)
+    s.drain(0.8)
+    tail = s.allbuf[mark:].decode("utf-8", "replace")
+    assert re.search(r"\x1b\[[0-9;]*48;2;46;160;67[0-9;]*m +(Start|Stop)", tail), \
+        "x key did not render an active Start/Stop menu row"
+    assert "Remove with data" in tail, "x key menu lacks the Remove with data item"
+
+    # Esc closes; j moves to the next row, and x reopens there
+    s.send(b"\x1b"); time.sleep(0.05)
+    s.drain(0.4)
+    s.send(b"j"); time.sleep(0.05)
+    s.drain(0.4)
+    mark = len(s.allbuf)
+    s.send(b"x"); time.sleep(0.05)
+    s.drain(0.8)
+    tail = s.allbuf[mark:].decode("utf-8", "replace")
+    assert re.search(r"\x1b\[[0-9;]*48;2;46;160;67[0-9;]*m +(Start|Stop)", tail), \
+        "x after j did not reopen the popup"
+    assert "Remove with data" in tail, "x after j menu lacks the Remove with data item"
+
+    # Esc closes; a forced repaint must carry no menu labels
+    s.send(b"\x1b"); time.sleep(0.05)
+    mark = len(s.allbuf)
+    s.send(b"\x1b[<64;60;20M"); time.sleep(0.05)  # wheel elsewhere -> repaint
+    s.drain(0.8)
+    tail = s.allbuf[mark:].decode("utf-8", "replace")
+    assert "Remove with data" not in tail, "x key menu survived Esc"
+
+
+@check
 def narrow_terminal_no_panic(s):
     # reuse current session with a resize instead of a second spawn
     winsize = struct.pack("HHHH", 20, 100, 0, 0)
