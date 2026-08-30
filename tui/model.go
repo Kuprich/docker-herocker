@@ -2372,11 +2372,47 @@ func (m Model) toggleContainer() tea.Cmd {
 	c := m.containers[m.selectedIdx]
 	return func() tea.Msg {
 		var err error
-		if c.State == "running" {
+		switch c.State {
+		case "running":
 			err = m.docker.StopContainer(c.ID)
-		} else {
+		case "paused":
+			err = m.docker.UnpauseContainer(c.ID)
+		default:
 			err = m.docker.StartContainer(c.ID)
 		}
+		if err != nil {
+			return errMsg{err}
+		}
+		time.Sleep(500 * time.Millisecond)
+		return m.refreshNow()()
+	}
+}
+
+// pauseContainer suspends the running processes of the selected container
+// without stopping the container itself.
+func (m Model) pauseContainer() tea.Cmd {
+	if m.activeTab != tabContainers || m.selectedIdx >= len(m.containers) {
+		return nil
+	}
+	c := m.containers[m.selectedIdx]
+	return func() tea.Msg {
+		err := m.docker.PauseContainer(c.ID)
+		if err != nil {
+			return errMsg{err}
+		}
+		time.Sleep(500 * time.Millisecond)
+		return m.refreshNow()()
+	}
+}
+
+// resumeContainer resumes the process execution within a paused container.
+func (m Model) resumeContainer() tea.Cmd {
+	if m.activeTab != tabContainers || m.selectedIdx >= len(m.containers) {
+		return nil
+	}
+	c := m.containers[m.selectedIdx]
+	return func() tea.Msg {
+		err := m.docker.UnpauseContainer(c.ID)
 		if err != nil {
 			return errMsg{err}
 		}

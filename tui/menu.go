@@ -41,18 +41,27 @@ type popupMenu struct {
 const menuMinWidth = 16
 
 // containerMenuItems builds the first-stage actions for a container: a
-// state-dependent Start/Stop plus the (confirmed) Remove and Remove-with-data
-// variants.
+// state-dependent Stop/Pause or Start/Resume, plus the (confirmed) Remove and
+// Remove-with-data variants.
 func (m Model) containerMenuItems(c docker.Container) []menuItem {
-	label := "Start"
-	if c.State == "running" {
-		label = "Stop"
+	var items []menuItem
+	switch c.State {
+	case "running":
+		items = append(items,
+			menuItem{label: "Stop", activate: m.toggleContainer},
+			menuItem{label: "Pause", activate: m.pauseContainer},
+		)
+	case "paused":
+		items = append(items,
+			menuItem{label: "Resume", activate: m.resumeContainer},
+		)
+	default:
+		items = append(items, menuItem{label: "Start", activate: m.toggleContainer})
 	}
-	return []menuItem{
-		{label: label, activate: m.toggleContainer},
-		{label: "Remove", confirm: true},
-		{label: "Remove with data", confirm: true, removeVolumes: true},
-	}
+	return append(items,
+		menuItem{label: "Remove", confirm: true},
+		menuItem{label: "Remove with data", confirm: true, removeVolumes: true},
+	)
 }
 
 // enterRemoveConfirm swaps the popup into the destructive-action stage: a

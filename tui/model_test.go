@@ -1730,11 +1730,14 @@ func TestRenderContainerMenuShape(tt *testing.T) {
 	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[3]), "│")); got != "Stop" {
 		tt.Errorf("first item = %q, want a Stop row for a running container", got)
 	}
-	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[4]), "│")); got != "Remove" {
-		tt.Errorf("second item = %q, want Remove", got)
+	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[4]), "│")); got != "Pause" {
+		tt.Errorf("second item = %q, want a Pause row for a running container", got)
 	}
-	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[5]), "│")); got != "Remove with data" {
-		tt.Errorf("third item = %q, want Remove with data", got)
+	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[5]), "│")); got != "Remove" {
+		tt.Errorf("third item = %q, want Remove", got)
+	}
+	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[6]), "│")); got != "Remove with data" {
+		tt.Errorf("fourth item = %q, want Remove with data", got)
 	}
 
 	// the selected row (sel=0) is inverted with the accent background; the
@@ -1747,6 +1750,9 @@ func TestRenderContainerMenuShape(tt *testing.T) {
 		tt.Error("unselected menu row must not carry the accent background")
 	}
 	if strings.Contains(rows[5], activeBG) {
+		tt.Error("unselected menu row must not carry the accent background")
+	}
+	if strings.Contains(rows[6], activeBG) {
 		tt.Error("unselected menu row must not carry the accent background")
 	}
 
@@ -1844,8 +1850,16 @@ func TestMenuNavigationAndEsc(tt *testing.T) {
 		tt.Errorf("down = %d, want 2", next.menu.sel)
 	}
 	next = testMouseUpdate(next, down)
+	if next.menu.sel != 3 {
+		tt.Errorf("down = %d, want 3", next.menu.sel)
+	}
+	next = testMouseUpdate(next, down)
+	if next.menu.sel != 3 {
+		tt.Errorf("down past the last item = %d, want 3 (clamped)", next.menu.sel)
+	}
+	next = testMouseUpdate(next, up)
 	if next.menu.sel != 2 {
-		tt.Errorf("down past the last item = %d, want 2 (clamped)", next.menu.sel)
+		tt.Errorf("up = %d, want 2", next.menu.sel)
 	}
 	next = testMouseUpdate(next, up)
 	if next.menu.sel != 1 {
@@ -1907,9 +1921,10 @@ func TestMenuClickOutsideCloses(tt *testing.T) {
 	m.fitViewports()
 	m = openMenuFor(m, 0)
 
-	// left-click on the Remove item (title + separator above it, plus the top
-	// border) activates it and keeps the popup open in the confirm stage
-	itemY := m.menu.y + 4 + 1 // 0-based row -> 1-based mouse Y
+	// left-click on the Remove item (running: title + separator + Stop + Pause
+	// above it, plus the top border) activates it and keeps the popup open in
+	// the confirm stage
+	itemY := m.menu.y + 5 + 1 // 0-based row -> 1-based mouse Y
 	itemX := m.menu.x + 3 + 1
 	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: itemX, Y: itemY})
 	if !next.menuOpen {
@@ -1949,11 +1964,16 @@ func TestMenuRemoveFlows(tt *testing.T) {
 		return openMenuFor(detailTestModel(), idx)
 	}
 
-	// plain Remove: down to it, Enter stages the confirm, Enter confirms Yes
+	// plain Remove: down to it (past Pause), Enter stages the confirm, Enter
+	// confirms Yes
 	m := openAt(0) // row 0
 	next, cmd := testUpdate(m, down)
 	if next.menu.sel != 1 {
-		tt.Fatalf("down = %d, want Remove at 1", next.menu.sel)
+		tt.Fatalf("down = %d, want Pause at 1", next.menu.sel)
+	}
+	next, cmd = testUpdate(next, down)
+	if next.menu.sel != 2 {
+		tt.Fatalf("down = %d, want Remove at 2", next.menu.sel)
 	}
 	next, cmd = testUpdate(next, enter)
 	if !next.menu.confirm {
@@ -1976,6 +1996,7 @@ func TestMenuRemoveFlows(tt *testing.T) {
 	// Escape in the confirm stage cancels without dispatching
 	m = openAt(0)
 	next, _ = testUpdate(m, down)
+	next, _ = testUpdate(next, down)
 	next, _ = testUpdate(next, enter)
 	next, cmd = testUpdate(next, tea.KeyMsg{Type: tea.KeyEsc})
 	if next.menuOpen {
@@ -1988,6 +2009,7 @@ func TestMenuRemoveFlows(tt *testing.T) {
 	// "No, cancel" closes the popup without dispatching
 	m = openAt(0)
 	next, _ = testUpdate(m, down)
+	next, _ = testUpdate(next, down)
 	next, _ = testUpdate(next, enter)
 	next, _ = testUpdate(next, down) // sel moves to "No, cancel"
 	if got := next.menu.items[next.menu.sel].label; got != "No, cancel" {
@@ -2001,12 +2023,14 @@ func TestMenuRemoveFlows(tt *testing.T) {
 		tt.Error("No, cancel must not dispatch a command")
 	}
 
-	// Remove with data: down twice, Enter, confirm header mentions volumes
+	// Remove with data: down three times, Enter, confirm header mentions
+	// volumes
 	m = openAt(0)
 	next, _ = testUpdate(m, down)
 	next, _ = testUpdate(next, down)
-	if next.menu.sel != 2 {
-		tt.Fatalf("down down = %d, want Remove with data at 2", next.menu.sel)
+	next, _ = testUpdate(next, down)
+	if next.menu.sel != 3 {
+		tt.Fatalf("down down down = %d, want Remove with data at 3", next.menu.sel)
 	}
 	next, _ = testUpdate(next, enter)
 	if !next.menu.confirm {
@@ -2086,6 +2110,70 @@ func TestKeyXOpensContextMenu(tt *testing.T) {
 	next, _ = testUpdate(m, x)
 	if next.menuOpen {
 		tt.Fatal("x must not open the popup outside the Containers tab")
+	}
+}
+
+func TestMenuPauseResume(tt *testing.T) {
+	enter := tea.KeyMsg{Type: tea.KeyEnter}
+	down := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}
+
+	// running container: Stop + Pause come before the Remove variants
+	m := detailTestModel()
+	m.containers = makeTestContainers(3)
+	m.fitViewports()
+	open := openMenuFor(m, 0)
+	for i, want := range []string{"Stop", "Pause", "Remove", "Remove with data"} {
+		if got := open.menu.items[i].label; got != want {
+			tt.Errorf("running item %d = %q, want %q", i, got, want)
+		}
+	}
+	// Pause closes the popup and dispatches the pause command
+	m = open
+	next, cmd := testUpdate(m, down)
+	next, cmd = testUpdate(next, enter)
+	if next.menuOpen {
+		tt.Fatal("Enter on Pause should close the popup")
+	}
+	if cmd == nil {
+		tt.Error("Pause must dispatch a command")
+	}
+
+	// paused container: only Resume for the state action
+	pz := detailTestModel()
+	c := makeTestContainers(1)[0]
+	c.State = "paused"
+	pz.containers = []docker.Container{c}
+	pz.fitViewports()
+	pz = openMenuFor(pz, 0)
+	if got := pz.menu.items[0].label; got != "Resume" {
+		tt.Fatalf("paused first item = %q, want Resume", got)
+	}
+	next, cmd = testUpdate(pz, enter)
+	if next.menuOpen {
+		tt.Fatal("Enter on Resume should close the popup")
+	}
+	if cmd == nil {
+		tt.Error("Resume must dispatch a command")
+	}
+	// a paused container has no Pause item
+	for _, it := range pz.menu.items {
+		if it.label == "Pause" {
+			tt.Error("paused container must not offer Pause")
+		}
+	}
+
+	// non-running, non-paused: Start toggle only, no Pause
+	m = detailTestModel()
+	m.containers = makeTestContainers(3)
+	m.fitViewports()
+	ex := openMenuFor(m, 1) // exited
+	if got := ex.menu.items[0].label; got != "Start" {
+		tt.Errorf("exited first item = %q, want Start", got)
+	}
+	for _, it := range ex.menu.items {
+		if it.label == "Pause" {
+			tt.Error("exited container must not offer Pause")
+		}
 	}
 }
 

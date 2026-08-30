@@ -211,6 +211,16 @@ func (c *Client) RestartContainer(id string) error {
 	return err
 }
 
+func (c *Client) PauseContainer(id string) error {
+	_, err := c.cli.ContainerPause(context.Background(), id, mclient.ContainerPauseOptions{})
+	return err
+}
+
+func (c *Client) UnpauseContainer(id string) error {
+	_, err := c.cli.ContainerUnpause(context.Background(), id, mclient.ContainerUnpauseOptions{})
+	return err
+}
+
 func (c *Client) RemoveContainer(id string) error {
 	_, err := c.cli.ContainerRemove(context.Background(), id, mclient.ContainerRemoveOptions{Force: true})
 	return err
