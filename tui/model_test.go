@@ -69,6 +69,12 @@ func TestStateColorsAreDistinct(tt *testing.T) {
 }
 
 func TestRenderPortsCellFillsWidthWithBackground(tt *testing.T) {
+	// lipgloss downgrades to the Ascii profile when stdout is not a TTY;
+	// force TrueColor so the emitted SGR sequences assert the real palette.
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	tt.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+
 	ports := []docker.Port{
 		{PrivatePort: 80, PublicPort: 8080, Type: "tcp"},
 		{PrivatePort: 53, PublicPort: 5353, Type: "udp"},
@@ -85,6 +91,14 @@ func TestRenderPortsCellFillsWidthWithBackground(tt *testing.T) {
 	if !strings.HasPrefix(plain, want) {
 		tt.Errorf("cell = %q, want prefix %q", plain, want)
 	}
+	// published host ports carry their own orange highlight
+	hot := lipgloss.Color("#f5a742")
+	for _, digit := range []string{"8080", "5353"} {
+		frag := lipgloss.NewStyle().Background(t.Background).Foreground(hot).Render(digit)
+		if !strings.Contains(cell, frag) {
+			tt.Errorf("cell missing styled host port %q", digit)
+		}
+	}
 	// protocol suffixes carry their own color styles
 	udpStyle := lipgloss.NewStyle().Background(t.Background).Foreground(t.Warning).Render("/udp")
 	tcpStyle := lipgloss.NewStyle().Background(t.Background).Foreground(t.Muted).Render("/tcp")
@@ -92,6 +106,25 @@ func TestRenderPortsCellFillsWidthWithBackground(tt *testing.T) {
 		if !strings.Contains(cell, frag) {
 			tt.Errorf("cell missing styled segment %q", stripANSI(frag))
 		}
+	}
+}
+
+func TestRenderPortsCellPrivateOnlyUnhighlighted(tt *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	tt.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+
+	cell, ok := renderPortsCell([]docker.Port{{PrivatePort: 80, Type: "tcp"}}, 20, t.Background)
+	if !ok {
+		tt.Fatal("expected single private port to fit")
+	}
+	plain := stripANSI(cell)
+	if !strings.HasPrefix(plain, "80/tcp") {
+		tt.Errorf("cell = %q, want prefix %q", plain, "80/tcp")
+	}
+	hot := lipgloss.NewStyle().Background(t.Background).Foreground(lipgloss.Color("#f5a742")).Render("80")
+	if strings.Contains(cell, hot) {
+		tt.Error("private-only port must not get the host highlight")
 	}
 }
 

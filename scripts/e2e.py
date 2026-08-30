@@ -132,6 +132,22 @@ def port_lists_have_no_duplicates(s):
 
 
 @check
+def host_ports_highlighted(s):
+    s.drain(1.5)
+    if "->" not in s.plain():
+        return  # no published ports in this environment
+    # the published host port is styled with its own truecolor foreground and
+    # the arrow is a separately styled fragment; the exact RGB is pinned by
+    # TestRenderPortsCellFillsWidthWithBackground, so this only checks that
+    # the digits are actually highlighted (not plain)
+    styled = re.compile(
+        rb"\x1b\[[0-9;]*m\d+\x1b\[0m\x1b\[[0-9;]*m->"
+    )
+    hits = styled.findall(s.allbuf)
+    assert hits, "published host ports should be drawn with their own highlight"
+
+
+@check
 def click_tab_with_margin_offset(s):
     s.drain(3.0)  # let the app render and answer terminal queries
     before = len(s.plain())

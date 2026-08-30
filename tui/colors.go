@@ -49,6 +49,10 @@ func renderPortsCell(ports []docker.Port, width int, bg lipgloss.Color) (string,
 	}
 	base := lipgloss.NewStyle().Background(bg).Foreground(t.Foreground)
 	fill := lipgloss.NewStyle().Background(bg)
+	// hostStyle draws the published (host-side) port, the value bound on the
+	// machine running Docker rather than inside the container, so the port a
+	// user would actually connect to stands out from the mapping.
+	hostStyle := lipgloss.NewStyle().Background(bg).Foreground(lipgloss.Color("#f5a742"))
 	suffix := func(proto string) lipgloss.Style {
 		if proto == "udp" {
 			return lipgloss.NewStyle().Background(bg).Foreground(t.Warning)
@@ -62,7 +66,8 @@ func renderPortsCell(ports []docker.Port, width int, bg lipgloss.Color) (string,
 			b.WriteString(base.Render(", "))
 		}
 		if p.PublicPort != 0 {
-			b.WriteString(base.Render(fmt.Sprintf("%d->%d", p.PublicPort, p.PrivatePort)))
+			b.WriteString(hostStyle.Render(fmt.Sprintf("%d", p.PublicPort)))
+			b.WriteString(base.Render(fmt.Sprintf("->%d", p.PrivatePort)))
 		} else {
 			b.WriteString(base.Render(fmt.Sprintf("%d", p.PrivatePort)))
 		}
