@@ -1597,3 +1597,91 @@ func TestInfoDragTimeoutFinalizes(tt *testing.T) {
 		tt.Error("finalized Info selection covers no text")
 	}
 }
+
+func TestCopyToastArmedOnRelease(tt *testing.T) {
+	m := detailTestModel()
+	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 20})
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 30, Y: 22})
+	released, cmd := testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 30, Y: 22})
+	if cmd == nil {
+		tt.Error("drag release should return the copy command")
+	}
+	if !released.copyToast {
+		tt.Error("release that copies should arm the copied-toast badge")
+	}
+	if released.copyToastGen == 0 {
+		tt.Error("copied-toast gen should bump on a copy")
+	}
+	// a stale timer from an older copy must not hide a freshly armed toast
+	if again, _ := testUpdate(released, copyToastMsg{gen: released.copyToastGen - 1}); !again.copyToast {
+		tt.Error("stale copyToastMsg must not clear the current toast")
+	}
+	// the matching expiry timer hides it
+	if expired, _ := testUpdate(released, copyToastMsg{gen: released.copyToastGen}); expired.copyToast {
+		tt.Error("matching copyToastMsg should clear the toast")
+	}
+}
+
+func TestCopyToastViaCopyKey(tt *testing.T) {
+	m := logTestModel()
+	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21})
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 22})
+	// lost release (timeout) keeps the selection active for a manual copy
+	next, _ = testUpdate(next, dragTimeoutMsg{gen: next.dragGen})
+	if !next.logSel.active {
+		tt.Fatal("timed-out drag should keep an active selection")
+	}
+	keyY := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")}
+	copied, cmd := testUpdate(next, keyY)
+	if cmd == nil {
+		tt.Fatal("y with an active selection should copy")
+	}
+	if !copied.copyToast {
+		tt.Error("copy key should arm the copied-toast badge")
+	}
+	// y without a selection neither copies nor arms the toast
+	if noop, noCmd := testUpdate(logTestModel(), keyY); noCmd != nil || noop.copyToast {
+		tt.Error("y without a selection must neither copy nor arm the toast")
+	}
+}
+
+func TestCopyToastNotOnPlainClick(tt *testing.T) {
+	m := detailTestModel()
+	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 20})
+	cl, cmd := testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 1, Y: 20})
+	if cmd != nil {
+		tt.Error("plain click should not copy")
+	}
+	if cl.copyToast {
+		tt.Error("plain click must not arm the copied-toast badge")
+	}
+}
+
+func TestTabBarToastBadge(tt *testing.T) {
+	m := detailTestModel()
+	m.copyToast = false
+	off := m.renderTabBar()
+	if strings.Contains(off, "Copied to clipboard") {
+		tt.Error("badge must be hidden when no copy happened")
+	}
+	if rows := strings.Count(off, "\n"); rows != 2 {
+		tt.Errorf("tab bar should stay 3 rows without the badge, got %d", rows+1)
+	}
+
+	m.copyToast = true
+	on := m.renderTabBar()
+	if !strings.Contains(on, "Copied to clipboard") {
+		tt.Error("badge should appear when a copy happened")
+	}
+	if rows := strings.Count(on, "\n"); rows != 2 {
+		tt.Errorf("badge must not change the tab bar height, got %d rows", rows+1)
+	}
+
+	// narrow terminal: the badge is skipped rather than wrapping the tab row
+	narrow := m
+	narrow.width = 72
+	n := narrow.renderTabBar()
+	if strings.Contains(n, "Copied to clipboard") {
+		tt.Error("badge should be skipped when the terminal is too narrow")
+	}
+}

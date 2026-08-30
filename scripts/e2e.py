@@ -309,6 +309,34 @@ def info_drag_selects_and_copies(s):
 
 
 @check
+def copy_toast_notifies(s):
+    s.drain(3.0)
+    # open the Info sub-tab (sub-tab strip at screen rows 16..18)
+    s.send(b"\x1b[<0;1;17M"); time.sleep(0.05)
+    s.send(b"\x1b[<0;1;17m")
+    s.drain(1.0)
+
+    badge = b"Copied to clipboard"
+    assert badge not in s.allbuf, "toast badge visible before any copy"
+
+    # drag + release over the Info body -> auto-copy arms the top-right toast
+    mark = len(s.allbuf)
+    s.send(b"\x1b[<0;2;20M"); time.sleep(0.05)
+    s.send(b"\x1b[<32;40;22M"); time.sleep(0.05)
+    s.send(b"\x1b[<0;40;22m")
+    s.drain(0.8)
+    assert badge in s.allbuf[mark:], "toast badge did not appear after the copy"
+
+    # after copyToastDuration (2s) the badge expires; a forced repaint must
+    # carry no trace of it
+    s.drain(2.6)
+    mark = len(s.allbuf)
+    s.send(b"\x1b[<64;90;22M"); time.sleep(0.05)  # wheel over the Info pane
+    s.drain(0.8)
+    assert badge not in s.allbuf[mark:], "toast badge did not expire"
+
+
+@check
 def selection_survives_log_refresh(s):
     s.drain(3.0)
     # open the Logs sub-tab so the log body is underneath the cursor

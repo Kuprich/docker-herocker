@@ -32,6 +32,11 @@ const (
 	// is never auto-copied.
 	dragTimeout = 2 * time.Second
 
+	// copyToastDuration is how long the "Copied to clipboard" badge stays in
+	// the top-right corner after a successful OSC 52 copy. It mirrors
+	// dragTimeout so the toast and the lost-release timeout expire together.
+	copyToastDuration = 2 * time.Second
+
 	// logMaxWrappedLines caps the pre-wrapped Logs pane buffer so
 	// incremental appends cannot grow it without bound.
 	logMaxWrappedLines = 4000

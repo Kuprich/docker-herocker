@@ -16,6 +16,15 @@ var selTextStyle = lipgloss.NewStyle().
 	Background(lipgloss.Color("#2d4a2e")).
 	Foreground(t.Foreground)
 
+// CopyToastStyle is the transient "Copied to clipboard" pill drawn at the
+// right edge of the tab bar after an OSC 52 copy. It mirrors the active-tab
+// palette so it reads as a positive status rather than chrome.
+var CopyToastStyle = lipgloss.NewStyle().
+	Background(lipgloss.Color("#2ea043")).
+	Foreground(t.Background).
+	Bold(true).
+	Padding(0, 1)
+
 var (
 	BaseStyle = lipgloss.NewStyle().
 			Background(t.Background).

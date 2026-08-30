@@ -143,6 +143,9 @@ type Model struct {
 	dragGen              uint64 // bumped on every drag start/release; guards stale timers
 	detailContent        string // plain (ANSI-stripped) Info body, selection buffer geometry
 	detailStyled         string // styled Info body, re-decorated per render when selected
+
+	copyToast    bool   // shows the "Copied to clipboard" badge in the tab bar
+	copyToastGen uint64 // bumped per copy; guards stale copyToastTimer ticks
 }
 
 func New(dcli *docker.Client) Model {
@@ -191,6 +194,25 @@ type dragTimeoutMsg struct{ gen uint64 }
 // dragTimeout. Re-arming it on every drag event keeps pauses from tripping it.
 func dragTimer(gen uint64) tea.Cmd {
 	return tea.Tick(dragTimeout, func(time.Time) tea.Msg { return dragTimeoutMsg{gen: gen} })
+}
+
+// copyToastMsg expires the "Copied to clipboard" badge; its gen must match
+// m.copyToastGen or a newer copy has re-armed the toast and this one is stale.
+type copyToastMsg struct{ gen uint64 }
+
+// copyToastTimer hides the badge copyToastDuration after the copy that armed
+// it. A fresh copy bumps the gen so an older timer cannot clear the new toast.
+func copyToastTimer(gen uint64) tea.Cmd {
+	return tea.Tick(copyToastDuration, func(time.Time) tea.Msg { return copyToastMsg{gen: gen} })
+}
+
+// armCopyToast marks the top-right badge visible and returns its expiry timer.
+// Callers must batch it with the OSC 52 copy command so the toast shows and
+// auto-hides around the same clip.
+func (m *Model) armCopyToast() tea.Cmd {
+	m.copyToastGen++
+	m.copyToast = true
+	return copyToastTimer(m.copyToastGen)
 }
 
 // innerW returns the content width available to all renderers inside the
@@ -270,11 +292,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				switch m.activeSubTab {
 				case subTabLogs:
 					if m.logSel.active {
-						return m, osc52Copy(m.selectionText())
+						return m, tea.Batch(osc52Copy(m.selectionText()), m.armCopyToast())
 					}
 				case subTabInfo:
 					if m.detailSel.active {
-						return m, osc52Copy(selectedText(m.detailContent, m.detailSel))
+						return m, tea.Batch(osc52Copy(selectedText(m.detailContent, m.detailSel)), m.armCopyToast())
 					}
 				}
 			}
@@ -340,6 +362,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case m.detailDragSel:
 			m.detailDragSel = false
 			m.detailSel.active = !m.detailSel.isTrivial()
+		}
+		return m, nil
+
+	case copyToastMsg:
+		// A stale timer from an older copy must not hide a freshly armed toast.
+		if msg.gen == m.copyToastGen {
+			m.copyToast = false
 		}
 		return m, nil
 
@@ -670,6 +699,20 @@ func (m Model) renderTabBar() string {
 		}
 	}
 	tabsContent := lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
+	// The copy toast is drawn as a right-aligned pill on the same row: a
+	// flex spacer plus the badge. When the terminal is too narrow for the
+	// badge it is skipped entirely — the tab row must stay exactly one line
+	// so View() height and mouse→buffer coordinates remain in sync.
+	if m.copyToast {
+		badge := CopyToastStyle.Render("✓ Copied to clipboard")
+		if lipgloss.Width(tabsContent)+lipgloss.Width(badge)+2 <= cw {
+			gap := cw - lipgloss.Width(tabsContent) - lipgloss.Width(badge)
+			spacer := lipgloss.NewStyle().
+				Background(t.Background).
+				Render(strings.Repeat(" ", gap))
+			tabsContent = lipgloss.JoinHorizontal(lipgloss.Top, tabsContent, spacer, badge)
+		}
+	}
 	tabsContent = lipgloss.Place(cw, 1, lipgloss.Left, lipgloss.Top, tabsContent,
 		lipgloss.WithWhitespaceBackground(t.Background),
 	)
@@ -1620,6 +1663,9 @@ func (m *Model) finishDetailSelection(x, y int) tea.Cmd {
 	}
 	cmd := osc52CopyText(m.detailContent, m.detailSel)
 	m.detailSel = textSel{}
+	if cmd != nil {
+		return tea.Batch(cmd, m.armCopyToast())
+	}
 	return cmd
 }
 
@@ -1635,6 +1681,9 @@ func (m *Model) finishLogSelection(x, y int) tea.Cmd {
 	}
 	cmd := osc52CopyText(m.containerLogContent, m.logSel)
 	m.logSel = textSel{}
+	if cmd != nil {
+		return tea.Batch(cmd, m.armCopyToast())
+	}
 	return cmd
 }
 
