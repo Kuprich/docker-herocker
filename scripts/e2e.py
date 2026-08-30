@@ -421,6 +421,36 @@ def slow_drag_survives_log_refresh(s):
 
 
 @check
+def right_click_opens_container_menu(s):
+    s.drain(3.0)
+
+    mark = len(s.allbuf)
+    # right-press + release over the first container row. Layout: tab bar
+    # rows 0..2, separator 3, table header 4, separator 5, row 0 at y=6.
+    # content col ~20 -> terminal x = +app_margin_x
+    s.send(b"\x1b[<2;21;6M"); time.sleep(0.05)
+    s.send(b"\x1b[<2;21;6m")
+    s.drain(0.8)
+
+    tail = s.allbuf[mark:].decode("utf-8", "replace")
+    # the active menu row carries the accent background (46;160;67) before
+    # the label; the label is followed by trailing padding, so stop the match
+    # at the label itself
+    assert re.search(r"\x1b\[[0-9;]*48;2;46;160;67[0-9;]*m +(Start|Stop)", tail), \
+        "right-click did not render an active Start/Stop menu row"
+    assert "Remove" in tail, "context menu lacks the Remove item"
+    assert "Remove with data" in tail, "context menu lacks the Remove with data item"
+
+    # Esc closes the popup; a forced repaint must carry no menu labels
+    s.send(b"\x1b"); time.sleep(0.05)
+    mark = len(s.allbuf)
+    s.send(b"\x1b[<64;60;20M"); time.sleep(0.05)  # wheel elsewhere -> repaint
+    s.drain(0.8)
+    tail = s.allbuf[mark:].decode("utf-8", "replace")
+    assert "Remove with data" not in tail, "context menu survived Esc"
+
+
+@check
 def narrow_terminal_no_panic(s):
     # reuse current session with a resize instead of a second spawn
     winsize = struct.pack("HHHH", 20, 100, 0, 0)

@@ -25,6 +25,25 @@ var CopyToastStyle = lipgloss.NewStyle().
 	Bold(true).
 	Padding(0, 1)
 
+// MenuBoxStyle is the frame of the container right-click popup: rows and
+// border share the surface background so the popup blocks whatever the app
+// drew underneath it (no default-terminal cells can leak through).
+var MenuBoxStyle = lipgloss.NewStyle().
+	Background(t.Surface).
+	Foreground(t.Muted)
+
+// MenuItemStyle paints a regular (unselected) popup row.
+var MenuItemStyle = lipgloss.NewStyle().
+	Background(t.Surface).
+	Foreground(t.Foreground)
+
+// MenuActiveItemStyle is the highlighted popup row, mirroring the active-tab
+// palette (inverted green) so the cursor position reads instantly.
+var MenuActiveItemStyle = lipgloss.NewStyle().
+	Background(lipgloss.Color("#2ea043")).
+	Foreground(t.Background).
+	Bold(true)
+
 var (
 	BaseStyle = lipgloss.NewStyle().
 			Background(t.Background).

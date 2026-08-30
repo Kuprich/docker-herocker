@@ -146,6 +146,9 @@ type Model struct {
 
 	copyToast    bool   // shows the "Copied to clipboard" badge in the tab bar
 	copyToastGen uint64 // bumped per copy; guards stale copyToastTimer ticks
+
+	menu     popupMenu // container right-click context menu
+	menuOpen bool      // the popup is on screen and consumes input
 }
 
 func New(dcli *docker.Client) Model {
@@ -246,6 +249,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ready = true
 
 	case tea.KeyMsg:
+		// Context menu steals the keys it understands; anything else closes
+		// it. Quit is intentionally not handled so ctrl+c/q still exits.
+		if m.menuOpen {
+			if next, cmd, handled := m.handleMenuKey(msg); handled {
+				return next, cmd
+			}
+		}
 		switch {
 		case key.Matches(msg, keys.Quit):
 			return m, tea.Quit
@@ -500,6 +510,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Context menu: while open it consumes every mouse event - a left
+		// press on an item activates it, anything else drops the popup.
+		if m.menuOpen {
+			return m.handleMenuMouse(msg)
+		}
+
+		// Right-click over a container row opens the popup anchored at the
+		// cursor and makes that row current. The selection branches below
+		// only ever claim the left button, so elsewhere the right press falls
+		// through harmlessly to the existing handlers.
+		if msg.Type == tea.MouseRight && msg.Action == tea.MouseActionPress {
+			if r, ok := m.tableRowAt(msg.Y); ok {
+				m.selectedIdx = r
+				m.menu = m.buildContainerMenu(msg.X, msg.Y)
+				m.menuOpen = true
+				return m, nil
+			}
+		}
+
 		// Logs pane: the left button drags an app-owned text selection over
 		// the log body (reжим A). It is anchored in buffer coordinates so it
 		// tracks correctly through scroll and follow-appends. Sub-tab strip,
@@ -652,6 +681,9 @@ func (m Model) View() string {
 	// visible content by one and silently shifts mouse→buffer coordinates.
 	if lines := strings.Split(content, "\n"); len(lines) > m.height {
 		content = strings.Join(lines[:m.height], "\n")
+	}
+	if m.menuOpen {
+		content = m.splicePopup(content)
 	}
 	return content
 }
@@ -1761,6 +1793,27 @@ func cellAt(content string, r int) (int, int) {
 		r -= n + 1 // +1 for the separating newline
 	}
 	return 0, 0
+}
+
+// tableRowAt maps a mouse screen row y (the same 1-based convention
+// handleClick uses) to a visible container-list index on the Containers tab.
+// The tab bar, list header and sub-tab strip are excluded, so only real
+// container rows hit.
+func (m Model) tableRowAt(y int) (int, bool) {
+	if m.activeTab != tabContainers {
+		return 0, false
+	}
+	contentH := m.height - tabBarHeight - helpBarHeight
+	topH := int(float64(contentH) * splitRatio)
+	absY := y - tabBarHeight
+	if absY < 0 || absY >= topH {
+		return 0, false
+	}
+	rowY := absY - 2 + m.mainYOff
+	if rowY < 0 || rowY >= len(m.containers) {
+		return 0, false
+	}
+	return rowY, true
 }
 
 func (m Model) handleClick(x, y int) (Model, tea.Cmd) {

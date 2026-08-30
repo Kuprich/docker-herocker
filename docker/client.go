@@ -211,6 +211,19 @@ func (c *Client) RestartContainer(id string) error {
 	return err
 }
 
+func (c *Client) RemoveContainer(id string) error {
+	_, err := c.cli.ContainerRemove(context.Background(), id, mclient.ContainerRemoveOptions{Force: true})
+	return err
+}
+
+// RemoveContainerVolumes removes the container together with its data: like
+// `docker rm -v`, it also drops the anonymous volumes mounted by the
+// container.
+func (c *Client) RemoveContainerVolumes(id string) error {
+	_, err := c.cli.ContainerRemove(context.Background(), id, mclient.ContainerRemoveOptions{Force: true, RemoveVolumes: true})
+	return err
+}
+
 func (c *Client) ContainerLogs(id, tail string, follow bool) (io.ReadCloser, error) {
 	res, err := c.cli.ContainerLogs(context.Background(), id, mclient.ContainerLogsOptions{
 		ShowStdout: true,

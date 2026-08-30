@@ -1690,6 +1690,333 @@ func TestCopyToastNotOnPlainClick(tt *testing.T) {
 	}
 }
 
+func TestRenderContainerMenuShape(tt *testing.T) {
+	// lipgloss downgrades to the Ascii profile when stdout is not a TTY;
+	// force TrueColor so the emitted SGR sequences assert the real palette.
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	tt.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+
+	m := detailTestModel()
+	m.containers = makeTestContainers(3)
+	m.menu = m.buildContainerMenu(20, 6) // 1-based mouse cell over table row 1
+	tt.Logf("popup at (%d,%d) %dx%d:\n%s", m.menu.x, m.menu.y, m.menu.w, m.menu.h,
+		strings.Join(m.renderContainerMenu(), "\n"))
+
+	rows := m.renderContainerMenu()
+	if len(rows) != m.menu.h {
+		tt.Errorf("menu rows = %d, want %d", len(rows), m.menu.h)
+	}
+	for _, r := range rows {
+		if lipgloss.Width(r) != m.menu.w {
+			tt.Errorf("menu row width = %d, want %d: %q", lipgloss.Width(r), m.menu.w, stripANSI(r))
+		}
+	}
+	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[1]), "│")); got != "Stop" {
+		tt.Errorf("first item = %q, want a Stop row for a running container", got)
+	}
+	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[2]), "│")); got != "Remove" {
+		tt.Errorf("second item = %q, want Remove", got)
+	}
+	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[3]), "│")); got != "Remove with data" {
+		tt.Errorf("third item = %q, want Remove with data", got)
+	}
+
+	// the selected row (sel=0) is inverted with the accent background; the
+	// other rows are not
+	activeBG := ";48;2;46;160;67m"
+	if !strings.Contains(rows[1], activeBG) {
+		tt.Error("selected menu row must carry the accent background")
+	}
+	if strings.Contains(rows[2], activeBG) {
+		tt.Error("unselected menu row must not carry the accent background")
+	}
+	if strings.Contains(rows[3], activeBG) {
+		tt.Error("unselected menu row must not carry the accent background")
+	}
+
+	// two-stage Remove: entering the confirm swap rebuilds the box with a
+	// header naming the target plus Yes/No items
+	m.enterRemoveConfirm(false)
+	crows := m.renderContainerMenu()
+	if len(crows) != m.menu.h {
+		tt.Errorf("confirm rows = %d, want %d", len(crows), m.menu.h)
+	}
+	wantHeader := "Remove " + containerDisplayName(m.containers[m.selectedIdx]) + "?"
+	if got := strings.TrimSpace(strings.Trim(stripANSI(crows[1]), "│")); got != wantHeader {
+		tt.Errorf("confirm header = %q, want %q", got, wantHeader)
+	}
+	if got := strings.TrimSpace(strings.Trim(stripANSI(crows[2]), "│")); got != "Yes, remove" {
+		tt.Errorf("confirm yes = %q", got)
+	}
+	if !strings.Contains(crows[2], activeBG) {
+		tt.Error("confirm resets the cursor to the first (Yes, remove) item")
+	}
+	if got := strings.TrimSpace(strings.Trim(stripANSI(crows[3]), "│")); got != "No, cancel" {
+		tt.Errorf("confirm no = %q", got)
+	}
+
+	// the "Remove with data" variant: same confirm layout, its own header and
+	// the Yes item still selected
+	m.enterRemoveConfirm(true)
+	drows := m.renderContainerMenu()
+	if len(drows) != m.menu.h {
+		tt.Errorf("data-confirm rows = %d, want %d", len(drows), m.menu.h)
+	}
+	wantDataHeader := "Remove " + containerDisplayName(m.containers[m.selectedIdx]) + " and its volumes?"
+	if got := strings.TrimSpace(strings.Trim(stripANSI(drows[1]), "│")); got != wantDataHeader {
+		tt.Errorf("data-confirm header = %q, want %q", got, wantDataHeader)
+	}
+	if !strings.Contains(drows[2], activeBG) {
+		tt.Error("data-confirm resets the cursor to the first (Yes, remove) item")
+	}
+}
+
+func TestRightClickOpensContainerMenu(tt *testing.T) {
+	m := detailTestModel()
+	m.containers = makeTestContainers(3)
+	m.fitViewports()
+
+	// right press over table row 0 (1-based y: tabBar(3)+hdr(1)+row(1))
+	press := tea.MouseMsg{Type: tea.MouseRight, Action: tea.MouseActionPress, X: 20, Y: 5}
+	next := testMouseUpdate(m, press)
+	if !next.menuOpen {
+		tt.Fatal("right-click on a container row should open the popup")
+	}
+	if next.selectedIdx != 0 {
+		tt.Errorf("popup should select the clicked row, got %d", next.selectedIdx)
+	}
+	if got := next.menu.items[0].label; got != "Stop" {
+		tt.Errorf("first item = %q, want Stop for a running container", got)
+	}
+	if got := next.menu.items[1].label; got != "Remove" {
+		tt.Errorf("second item = %q, want Remove", got)
+	}
+	if got := next.menu.items[2].label; got != "Remove with data" {
+		tt.Errorf("third item = %q, want Remove with data", got)
+	}
+	// the anchor tracks the cursor (1-based mouse cell -> 0-based top-left)
+	if next.menu.x != 19 || next.menu.y != 4 {
+		tt.Errorf("anchor = (%d,%d), want (19,4)", next.menu.x, next.menu.y)
+	}
+
+	// the frame's own release must not close the popup
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseRight, Action: tea.MouseActionRelease, X: 20, Y: 5})
+	if !next.menuOpen {
+		tt.Fatal("right release after the opening press must keep the popup open")
+	}
+
+	// a right-click on a non-row area (below the table, sub-tab strip side)
+	off := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseRight, Action: tea.MouseActionPress, X: 20, Y: 12})
+	if off.menuOpen {
+		tt.Fatal("right-click off the table rows must not open a popup")
+	}
+}
+
+func TestMenuNavigationAndEsc(tt *testing.T) {
+	m := detailTestModel()
+	m.containers = makeTestContainers(3)
+	m.fitViewports()
+	m = testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseRight, Action: tea.MouseActionPress, X: 20, Y: 5})
+
+	down := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}
+	up := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")}
+
+	next := testMouseUpdate(m, down)
+	if next.menu.sel != 1 {
+		tt.Errorf("down = %d, want 1", next.menu.sel)
+	}
+	next = testMouseUpdate(next, down)
+	if next.menu.sel != 2 {
+		tt.Errorf("down = %d, want 2", next.menu.sel)
+	}
+	next = testMouseUpdate(next, down)
+	if next.menu.sel != 2 {
+		tt.Errorf("down past the last item = %d, want 2 (clamped)", next.menu.sel)
+	}
+	next = testMouseUpdate(next, up)
+	if next.menu.sel != 1 {
+		tt.Errorf("up = %d, want 1", next.menu.sel)
+	}
+	next = testMouseUpdate(next, up)
+	if next.menu.sel != 0 {
+		tt.Errorf("up = %d, want 0", next.menu.sel)
+	}
+	next = testMouseUpdate(next, up)
+	if next.menu.sel != 0 {
+		tt.Errorf("up past the first item = %d, want 0 (clamped)", next.menu.sel)
+	}
+
+	next, cmd := testUpdate(next, tea.KeyMsg{Type: tea.KeyEsc})
+	if next.menuOpen {
+		tt.Fatal("Esc should close the popup")
+	}
+	if cmd != nil {
+		tt.Error("Esc must not dispatch an action")
+	}
+
+	// a stray key closes the popup and is swallowed: it must not leak into
+	// the normal key handling (restart would run, selection would move)
+	m = testMouseUpdate(detailTestModel(), tea.MouseMsg{Type: tea.MouseRight, Action: tea.MouseActionPress, X: 20, Y: 5})
+	next, _ = testUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if next.menuOpen {
+		tt.Fatal("a stray key should close the popup")
+	}
+	if next.selectedIdx != 0 {
+		tt.Errorf("stray key leaked into normal handling, selection = %d", next.selectedIdx)
+	}
+}
+
+func TestMenuActivateStartStop(tt *testing.T) {
+	m := detailTestModel()
+	m.containers = makeTestContainers(3)
+	m.fitViewports()
+	m = testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseRight, Action: tea.MouseActionPress, X: 20, Y: 6}) // row 1 (exited)
+	if m.selectedIdx != 1 {
+		tt.Fatalf("clicked row = %d, want 1", m.selectedIdx)
+	}
+	if got := m.menu.items[0].label; got != "Start" {
+		tt.Errorf("first item = %q, want Start for an exited container", got)
+	}
+	// Enter on the action closes the popup and dispatches toggleContainer
+	next, cmd := testUpdate(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if next.menuOpen {
+		tt.Fatal("Enter on an action should close the popup")
+	}
+	if cmd == nil {
+		tt.Error("Enter on Start/Stop should dispatch a toggle command")
+	}
+}
+
+func TestMenuClickOutsideCloses(tt *testing.T) {
+	m := detailTestModel()
+	m.containers = makeTestContainers(3)
+	m.fitViewports()
+	m = testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseRight, Action: tea.MouseActionPress, X: 20, Y: 5})
+
+	// left-click on the second item (one row below the top border) activates
+	// it: Remove enters the confirm stage and keeps the popup open
+	itemY := m.menu.y + 2 + 1 // 0-based row -> 1-based mouse Y
+	itemX := m.menu.x + 2 + 1
+	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: itemX, Y: itemY})
+	if !next.menuOpen {
+		tt.Fatal("click on the Remove item should keep the popup open (confirm stage)")
+	}
+	if !next.menu.confirm {
+		tt.Fatal("Remove activation should enter the confirm stage")
+	}
+
+	// left-click clearly outside the box (right and below) closes the popup;
+	// the confirm stage widened the box, so measure against next's geometry
+	outX := next.menu.x + next.menu.w + 1
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: outX, Y: next.menu.y + next.menu.h + 1})
+	if next.menuOpen {
+		tt.Fatal("click outside the popup should close it")
+	}
+
+	// motion must not close; a wheel press closes. Open a fresh popup for this
+	// (m is still open from the first right-click, and a right-press while a
+	// popup is open deliberately closes it rather than re-anchoring).
+	m = detailTestModel()
+	m.containers = makeTestContainers(3)
+	m.fitViewports()
+	m = testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseRight, Action: tea.MouseActionPress, X: 20, Y: 5})
+	m = testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 20, Y: 5})
+	if !m.menuOpen {
+		tt.Fatal("mouse motion must not close the popup")
+	}
+	m = testMouseUpdate(m, tea.MouseMsg{Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress, X: 20, Y: 5})
+	if m.menuOpen {
+		tt.Fatal("wheel should close the popup")
+	}
+}
+
+func TestMenuRemoveFlows(tt *testing.T) {
+	down := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}
+	enter := tea.KeyMsg{Type: tea.KeyEnter}
+
+	openAt := func(y int) Model {
+		m := detailTestModel()
+		m.containers = makeTestContainers(3)
+		m.fitViewports()
+		return testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseRight, Action: tea.MouseActionPress, X: 20, Y: y})
+	}
+
+	// plain Remove: down to it, Enter stages the confirm, Enter confirms Yes
+	m := openAt(5) // row 0
+	next, cmd := testUpdate(m, down)
+	if next.menu.sel != 1 {
+		tt.Fatalf("down = %d, want Remove at 1", next.menu.sel)
+	}
+	next, cmd = testUpdate(next, enter)
+	if !next.menu.confirm {
+		tt.Fatal("Enter on Remove should stage the confirm")
+	}
+	if got := next.menu.header; got != "Remove test-container-0?" {
+		tt.Errorf("confirm header = %q", got)
+	}
+	if got := next.menu.items[0].label; got != "Yes, remove" {
+		tt.Errorf("confirm yes = %q", got)
+	}
+	next, cmd = testUpdate(next, enter)
+	if next.menuOpen {
+		tt.Fatal("Yes on the confirm should close the popup")
+	}
+	if cmd == nil {
+		tt.Error("Yes must dispatch the remove command")
+	}
+
+	// Escape in the confirm stage cancels without dispatching
+	m = openAt(5)
+	next, _ = testUpdate(m, down)
+	next, _ = testUpdate(next, enter)
+	next, cmd = testUpdate(next, tea.KeyMsg{Type: tea.KeyEsc})
+	if next.menuOpen {
+		tt.Fatal("Esc in the confirm should close the popup")
+	}
+	if cmd != nil {
+		tt.Error("Esc must not dispatch a command")
+	}
+
+	// "No, cancel" closes the popup without dispatching
+	m = openAt(5)
+	next, _ = testUpdate(m, down)
+	next, _ = testUpdate(next, enter)
+	next, _ = testUpdate(next, down) // sel moves to "No, cancel"
+	if got := next.menu.items[next.menu.sel].label; got != "No, cancel" {
+		tt.Fatalf("down in confirm = %d (%q)", next.menu.sel, got)
+	}
+	next, cmd = testUpdate(next, enter)
+	if next.menuOpen {
+		tt.Fatal("No, cancel should close the popup")
+	}
+	if cmd != nil {
+		tt.Error("No, cancel must not dispatch a command")
+	}
+
+	// Remove with data: down twice, Enter, confirm header mentions volumes
+	m = openAt(5)
+	next, _ = testUpdate(m, down)
+	next, _ = testUpdate(next, down)
+	if next.menu.sel != 2 {
+		tt.Fatalf("down down = %d, want Remove with data at 2", next.menu.sel)
+	}
+	next, _ = testUpdate(next, enter)
+	if !next.menu.confirm {
+		tt.Fatal("Enter on Remove with data should stage the confirm")
+	}
+	if got := next.menu.header; got != "Remove test-container-0 and its volumes?" {
+		tt.Errorf("data confirm header = %q", got)
+	}
+	next, cmd = testUpdate(next, enter)
+	if next.menuOpen {
+		tt.Fatal("Yes on the data confirm should close the popup")
+	}
+	if cmd == nil {
+		tt.Error("Yes must dispatch the remove-with-data command")
+	}
+}
+
 func TestTabBarToastBadge(tt *testing.T) {
 	m := detailTestModel()
 	m.copyToast = false
