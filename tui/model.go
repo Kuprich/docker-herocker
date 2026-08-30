@@ -816,7 +816,17 @@ func (m Model) buildDetailContent(w int) string {
 	if valW < 8 {
 		valW = 8
 	}
-	tv := func(s string) string { return Truncate(s, valW) }
+	// tv sanitizes a value for one labeled row. Newlines inside a Docker
+	// value (the ubuntu image's org.opencontainers.image.description is a
+	// paragraph) would split the row into several lines; each embedded line
+	// shorter than the pane would then be completed by the viewport with
+	// unstyled whitespace, showing the default terminal background.
+	tv := func(s string) string {
+		s = strings.ReplaceAll(s, "\r\n", " ")
+		s = strings.ReplaceAll(s, "\n", " ")
+		s = strings.ReplaceAll(s, "\r", " ")
+		return Truncate(s, valW)
+	}
 
 	var b strings.Builder
 	// The " Info:" title is part of the scrollable content so it scrolls
@@ -830,9 +840,16 @@ func (m Model) buildDetailContent(w int) string {
 	// padLine pads any row to the full block width w with theme-background
 	// spaces - lipgloss pads shorter lines with UNSTYLED whitespace after the
 	// last ANSI reset, which would show as default terminal background.
+	// A row longer than w is trimmed (with an ellipsis) instead: leaving it
+	// would let the viewport word-wrap it into continuation rows that it
+	// completes with unstyled whitespace - the same default-background leak -
+	// and would desync the one-row-per-buffer-row selection geometry.
 	padLine := func(s string) string {
 		if rest := w - lipgloss.Width(s); rest > 0 {
 			return s + rowStyle.Render(strings.Repeat(" ", rest))
+		}
+		if lipgloss.Width(s) > w {
+			return cutPlain(s, w-1) + rowStyle.Render("…")
 		}
 		return s
 	}

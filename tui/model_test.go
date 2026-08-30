@@ -786,6 +786,70 @@ func TestBuildDetailContentNetworksNameColumn(tt *testing.T) {
 	}
 }
 
+func TestBuildDetailContentMultilineLabelStaysOneRow(tt *testing.T) {
+	for _, w := range []int{60, 80, 120, 127, 160} {
+		m := New(nil)
+		m.containers = makeTestContainers(1)
+		m.detailsID = m.containers[0].ID
+		m.details = &docker.ContainerDetails{}
+		m.details.Config.Labels = map[string]string{
+			"com.example.collapse":           "A\n\nB C D E F G",
+			"com.example.verylong":           strings.Repeat("x", 1000),
+			"org.opencontainers.description": "The Ubuntu container image maintained by Canonical\n\nUbuntu is a Debian-based Linux operating system that runs from the desktop to the cloud.",
+		}
+		out := m.buildDetailContent(w)
+		plain := stripANSI(out)
+		rows := strings.Split(plain, "\n")
+		// Styled and plain content must carry the same row count: a value with
+		// embedded newlines must never split into extra rows (each would be
+		// completed by the viewport with unstyled whitespace).
+		if got := len(strings.Split(out, "\n")); got != len(rows) {
+			tt.Errorf("w=%d: styled/plain row count mismatch: %d vs %d", w, got, len(rows))
+		}
+		labelRows := map[string]string{}
+		for _, row := range rows {
+			if lipgloss.Width(row) > w {
+				tt.Errorf("w=%d: content row wider than pane (%d > %d): %q", w, lipgloss.Width(row), w, row)
+			}
+			for _, key := range []string{"com.example.collapse", "com.example.verylong", "org.opencontainers.description"} {
+				if strings.Contains(row, key) {
+					labelRows[key] = row
+				}
+			}
+		}
+		if row := labelRows["com.example.collapse"]; row == "" {
+			tt.Errorf("w=%d: collapse label missing", w)
+		} else if !strings.Contains(row, "A  B C D E F G") {
+			tt.Errorf("w=%d: newlines not collapsed: %q", w, row)
+		}
+		if row := labelRows["com.example.verylong"]; row == "" {
+			tt.Errorf("w=%d: verylong label missing", w)
+		} else if lipgloss.Width(row) != w {
+			tt.Errorf("w=%d: verylong row width %d, want full pane width %d: %q", w, lipgloss.Width(row), w, row)
+		} else if !strings.HasSuffix(row, "…") {
+			tt.Errorf("w=%d: clamped row missing ellipsis: %q", w, row)
+		}
+		if row := labelRows["org.opencontainers.description"]; row == "" {
+			tt.Errorf("w=%d: description label missing", w)
+		} else if lipgloss.Width(row) > w {
+			tt.Errorf("w=%d: description row wider than pane: %q", w, row)
+		}
+	}
+}
+
+func TestCutPlainTrimsToWidth(tt *testing.T) {
+	got := cutPlain("some\x1b[38;2;1;2;3m styled\x1b[0m text", 6)
+	if got != "some s" {
+		tt.Errorf("cutPlain = %q, want %q", got, "some s")
+	}
+	if got := cutPlain("short", 6); got != "short" {
+		tt.Errorf("cutPlain no-op expected, got %q", got)
+	}
+	if got := cutPlain("ab", 1); got != "a" {
+		tt.Errorf("cutPlain = %q, want %q", got, "a")
+	}
+}
+
 // logTestModel returns a Model wired for Logs-pane selection tests: width 120,
 // height 30 (so the content band starts at screen y == tabBarHeight+topH+5)
 // with a 6-line buffer scrolled one row in.

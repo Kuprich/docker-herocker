@@ -61,6 +61,21 @@ func Truncate(s string, max int) string {
 	return s[:max-1] + "…"
 }
 
+// cutPlain trims s (ANSI-stripped) to at most n visible runes, dropping any
+// trailing ANSI sequences. Assembled content rows are clamped to the pane
+// width with it so the viewport never word-wraps a row into continuation
+// lines that it then completes with unstyled whitespace.
+func cutPlain(s string, n int) string {
+	if n < 0 {
+		n = 0
+	}
+	r := []rune(ansiStripped(s))
+	if len(r) <= n {
+		return string(r)
+	}
+	return string(r[:n])
+}
+
 // ansiStripped removes SGR escape sequences from a string, leaving the
 // visible text behind.
 func ansiStripped(s string) string {
