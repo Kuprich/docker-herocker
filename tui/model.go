@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -34,6 +35,29 @@ type imageMsg []docker.Image
 type volumeMsg []docker.Volume
 type networkMsg []docker.Network
 type errMsg struct{ err error }
+
+// statsMsg carries one fresh resource snapshot per running container.
+type statsMsg []docker.Stats
+
+// statsSample is the previous raw CPU/clock reading used to compute the CPU
+// percent over the refresh interval.
+type statsSample struct {
+	cpu uint64
+	sys uint64
+}
+
+// cpuPercentFrom computes the CPU percent between two samples, scaled by the
+// number of online cores, mirroring the docker stats formula.
+func cpuPercentFrom(s docker.Stats, prev *statsSample) float64 {
+	if prev == nil || s.OnlineCPUs == 0 || s.SystemNano <= prev.sys || s.CPUNano < prev.cpu {
+		return 0
+	}
+	si := s.SystemNano - prev.sys
+	if si == 0 {
+		return 0
+	}
+	return 100 * float64(s.CPUNano-prev.cpu) / float64(si) * float64(s.OnlineCPUs)
+}
 
 // containerLogMsg carries freshly fetched log lines. incremental reports
 // whether content is a since-based append (true) or a full tail replace
@@ -116,6 +140,12 @@ type Model struct {
 	loading     bool
 	err         error
 
+	// stats holds the latest one-shot resource snapshots per container id;
+	// statsPrev keeps the previous CPU counters so cpuPercent can be computed
+	// from the delta over the refresh interval.
+	stats     map[string]docker.Stats
+	statsPrev map[string]statsSample
+
 	mainViewport viewport.Model
 	mainYOff     int
 	mainRows     int
@@ -162,6 +192,8 @@ func New(dcli *docker.Client) Model {
 		showAll:     true,
 		logFollow:   true,
 		selectedIdx: 0,
+		stats:       map[string]docker.Stats{},
+		statsPrev:   map[string]statsSample{},
 	}
 }
 
@@ -392,9 +424,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedIdx >= len(m.containers) {
 			m.selectedIdx = 0
 		}
+		// Drop snapshots for containers that are gone or stopped since the
+		// last refresh so the table never shows stale numbers.
+		ids := make(map[string]bool, len(msg))
+		for _, c := range msg {
+			ids[c.ID] = true
+		}
+		for id := range m.stats {
+			if !ids[id] {
+				delete(m.stats, id)
+				delete(m.statsPrev, id)
+			}
+		}
 		m.fitViewports()
 		m.scrollToSelected()
-		return m, m.loadContainerDetails()
+		return m, tea.Batch(m.loadContainerDetails(), m.statsCmd(msg))
+
+	case statsMsg:
+		for _, s := range msg {
+			var cp *statsSample
+			if p, ok := m.statsPrev[s.ID]; ok {
+				cp = &p
+			}
+			if cp == nil {
+				s.CPUPercent = -1 // first sample: no delta yet, render a dash
+			} else {
+				s.CPUPercent = cpuPercentFrom(s, cp)
+			}
+			m.statsPrev[s.ID] = statsSample{cpu: s.CPUNano, sys: s.SystemNano}
+			m.stats[s.ID] = s
+		}
+		return m, nil
 
 	case imageMsg:
 		m.images = msg
@@ -443,7 +503,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// in-flight drag) freezes the view so new lines can't scroll the
 		// highlighted rows off-screen; follow resumes once it is cleared.
 		follow := (m.logFollow || m.containerLogViewport.AtBottom()) && !m.logSel.active && !m.dragSel
-		wrapped := wrapLogCells(msg.content, innerW(m.width)-1)
+		wrapped := wrapLogCells(reformatLogTimestamps(msg.content), innerW(m.width)-1)
 		if msg.incremental {
 			if wrapped != "" {
 				if m.containerLogContent != "" {
@@ -1052,13 +1112,13 @@ func styleLogRows(content string, sel textSel, vw, height, yoff int) string {
 			if sel.active && i >= top && i <= bot {
 				lines[i] = selTextStyle.Width(vw).Render("")
 			} else {
-				lines[i] = row.Width(vw).Render(ln)
+				lines[i] = renderLogRow(ln, vw, row)
 			}
 			continue
 		}
 		from, to, ok := sel.rowSpan(i)
 		if !ok {
-			lines[i] = row.Width(vw).Render(ln)
+			lines[i] = renderLogRow(ln, vw, row)
 			continue
 		}
 		rs := []rune(ln)
@@ -1073,10 +1133,46 @@ func styleLogRows(content string, sel textSel, vw, height, yoff int) string {
 		span := string(rs[from : to+1])
 		suffix := string(rs[to+1:])
 		used := runewidth.StringWidth(prefix) + runewidth.StringWidth(span)
-		lines[i] = row.Render(prefix) + selTextStyle.Render(span) +
+		lines[i] = renderLogCell(prefix, row) + selTextStyle.Render(span) +
 			row.Copy().Width(max(0, vw-used)).Render(suffix)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// logTimestampLen returns the rune length of a leading "HH:MM:SS " timestamp
+// prefix (9 runes), or 0 when the line does not start with one.
+func logTimestampLen(line string) int {
+	rs := []rune(line)
+	if len(rs) >= 9 && rs[2] == ':' && rs[5] == ':' && rs[8] == ' ' {
+		return 9
+	}
+	return 0
+}
+
+// renderLogRow draws a full log line into a fixed-width row, coloring the
+// leading HH:MM:SS timestamp muted and the message in the regular foreground.
+func renderLogRow(line string, vw int, row lipgloss.Style) string {
+	if n := logTimestampLen(line); n > 0 {
+		muted := row.Copy().Foreground(t.Muted).Render(string([]rune(line)[:n-1]))
+		rest := row.Render(string([]rune(line)[n-1:]))
+		fill := vw - runewidth.StringWidth(line)
+		if fill < 0 {
+			fill = 0
+		}
+		return muted + rest + row.Render(strings.Repeat(" ", fill))
+	}
+	return row.Width(vw).Render(line)
+}
+
+// renderLogCell renders a substring of a log line (used as the non-selected
+// prefix/suffix of a highlighted row), muting a leading timestamp if any, so
+// the highlight and the muted time coexist on one line.
+func renderLogCell(s string, row lipgloss.Style) string {
+	if n := logTimestampLen(s); n > 0 {
+		return row.Copy().Foreground(t.Muted).Render(string([]rune(s)[:n-1])) +
+			row.Render(string([]rune(s)[n-1:]))
+	}
+	return row.Render(s)
 }
 
 // decorateSelection re-renders content with an app-owned text selection
@@ -1906,7 +2002,7 @@ func (m Model) renderContainerList(w, vw, h int) (string, string) {
 	if len(m.containers) == 0 {
 		return "", MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No containers found"))
 	}
-	hdr := fmt.Sprintf("     %-29s %-11s  %-32s  %-34s", "NAME", "STATE", "IMAGE", "PORTS")
+	hdr := fmt.Sprintf("     %-29s %-11s  %7s   %13s   %-20s  %-22s", "NAME", "STATE", "CPU %", "MEM", "IMAGE", "PORTS")
 	if pad := w - len([]rune(hdr)); pad > 0 {
 		hdr += strings.Repeat(" ", pad)
 	}
@@ -1918,7 +2014,15 @@ func (m Model) renderContainerList(w, vw, h int) (string, string) {
 		name := Truncate(strings.TrimPrefix(c.Names[0], "/"), 29)
 		state := Truncate(c.State, 11)
 		ports := formatPorts(c.Ports)
-		img := Truncate(c.Image, 32)
+		img := Truncate(c.Image, 20)
+
+		cpu, mem := "—", "—"
+		if st, ok := m.stats[c.ID]; ok {
+			if st.CPUPercent >= 0 {
+				cpu = formatCPU(st.CPUPercent)
+			}
+			mem = formatMem(st.MemUsage, st.MemLimit)
+		}
 
 		dot := "●"
 		if c.State == "exited" {
@@ -1926,7 +2030,7 @@ func (m Model) renderContainerList(w, vw, h int) (string, string) {
 		}
 		dotColor := stateColor(c.State)
 
-		line := fmt.Sprintf(" %s  %-29s %-11s  %-32s  %-34s", dot, name, state, img, ports)
+		line := fmt.Sprintf(" %s  %-29s %-11s  %7s   %13s   %-20s  %-22s", dot, name, state, cpu, mem, img, ports)
 		runes := []rune(line)
 		padding := colW - len(runes)
 		if padding > 0 {
@@ -1969,10 +2073,30 @@ func (m Model) renderContainerList(w, vw, h int) (string, string) {
 			portsRow = bgStyle.Render(seg(portsCol, len(runes)))
 		}
 
+		// MEM column: a fixed 13-rune cell right-aligned at imageCol. When the
+		// value has the "usage/limit" form, the used portion is highlighted;
+		// otherwise the whole cell is plain. The boundaries come only from the
+		// fixed column constants so the IMAGE column never shifts between rows,
+		// regardless of how long "usage" or "limit" happen to be.
+		memLen := len([]rune(mem))
+		memStart := memCol + 13 - memLen
+		memCell := bgStyle.Foreground(t.Foreground).Render(seg(memCol, memStart))
+
+		if slash := strings.IndexRune(mem, '/'); slash >= 0 {
+			usageLen := len([]rune(mem[:slash]))
+			usageEnd := memStart + usageLen
+			memCell += bgStyle.Copy().Foreground(memUsageColor).Render(seg(memStart, usageEnd))
+			memCell += bgStyle.Foreground(t.Foreground).Render(seg(usageEnd, imageCol))
+		} else {
+			memCell += bgStyle.Foreground(t.Foreground).Render(seg(memStart, imageCol))
+		}
+
 		row := bgStyle.Render(" ") +
 			bgStyle.Copy().Foreground(dotColor).Render(seg(1, 2)) +
 			bgStyle.Foreground(t.Foreground).Render(seg(2, stateCol)) +
-			bgStyle.Copy().Foreground(stateColor(c.State)).Render(seg(stateCol, imageCol)) +
+			bgStyle.Copy().Foreground(stateColor(c.State)).Render(seg(stateCol, cpuCol)) +
+			bgStyle.Foreground(t.Foreground).Render(seg(cpuCol, memCol)) +
+			memCell +
 			bgStyle.Foreground(t.Foreground).Render(seg(imageCol, portsCol)) +
 			portsRow
 		rows = append(rows, row)
@@ -2056,6 +2180,42 @@ func formatImageSize(bytes int64) string {
 func formatCreated(created int64) string {
 	t := time.Unix(created, 0)
 	return t.Format("2006-01-02")
+}
+
+// formatCPU renders a CPU percent with two decimals when it is small, one
+// otherwise, clamped to stay inside the column width.
+func formatCPU(pct float64) string {
+	pct = max(pct, 0)
+	if pct >= 1000 {
+		return "999.9%"
+	}
+	if pct < 10 {
+		return strconv.FormatFloat(pct, 'f', 2, 64) + "%"
+	}
+	return strconv.FormatFloat(pct, 'f', 1, 64) + "%"
+}
+
+// formatMem renders "usage/limit" using the same compact byte units, so the
+// pair fits the fixed-width column. A zero (unlimited) limit is a dash.
+func formatMem(usage, limit uint64) string {
+	if limit == 0 {
+		return formatBytes(usage) + "/—"
+	}
+	return formatBytes(usage) + "/" + formatBytes(limit)
+}
+
+// formatBytes prints a byte count in binary units with one decimal.
+func formatBytes(b uint64) string {
+	switch {
+	case b < 1<<10:
+		return strconv.FormatUint(b, 10) + "B"
+	case b < 1<<20:
+		return strconv.FormatFloat(float64(b)/(1<<10), 'f', 1, 64) + "K"
+	case b < 1<<30:
+		return strconv.FormatFloat(float64(b)/(1<<20), 'f', 1, 64) + "M"
+	default:
+		return strconv.FormatFloat(float64(b)/(1<<30), 'f', 1, 64) + "G"
+	}
 }
 
 func (m Model) renderVolumeList(w, vw, h int) (string, string) {
@@ -2260,6 +2420,33 @@ func containerLogCursor(content string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+// reformatLogTimestamps rewrites the RFC3339Nano timestamp that docker
+// prefixes each log line with into a compact HH:MM:SS form, so the pane shows
+// the time without the 26-char noise. Any line whose leading token is not a
+// docker timestamp is left untouched. Bare timestamp lines (no text after the
+// timestamp) become "HH:MM:SS" with empty content.
+func reformatLogTimestamps(content string) string {
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		ts := line
+		sp := strings.IndexByte(line, ' ')
+		if sp > 0 {
+			ts = line[:sp]
+		}
+		t, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			continue
+		}
+		prefix := t.Format("15:04:05")
+		if sp > 0 {
+			lines[i] = prefix + " " + line[sp+1:]
+		} else {
+			lines[i] = prefix
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // pruneLines keeps only the last n lines of s, used to bound the pre-wrapped
 // log buffer after incremental appends.
 func pruneLines(s string, n int) string {
@@ -2362,6 +2549,48 @@ func (m Model) refreshNow() tea.Cmd {
 			}
 			return containerMsg(containers)
 		}
+	}
+}
+
+// statsCmd fetches a one-shot resource snapshot per running/paused container
+// in parallel and returns a single statsMsg. Containers without samples are
+// skipped; the table keeps whatever value it had.
+func (m Model) statsCmd(containers []docker.Container) tea.Cmd {
+	if m.docker == nil {
+		return nil
+	}
+	var ids []string
+	for _, c := range containers {
+		if c.State == "running" || c.State == "paused" {
+			ids = append(ids, c.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	return func() tea.Msg {
+		var wg sync.WaitGroup
+		res := make(chan docker.Stats, len(ids))
+		for _, id := range ids {
+			wg.Add(1)
+			go func(id string) {
+				defer wg.Done()
+				s, err := m.docker.ContainerStats(id)
+				if err != nil {
+					return
+				}
+				res <- *s
+			}(id)
+		}
+		go func() {
+			wg.Wait()
+			close(res)
+		}()
+		var out statsMsg
+		for s := range res {
+			out = append(out, s)
+		}
+		return out
 	}
 }
 

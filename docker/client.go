@@ -2,12 +2,14 @@ package docker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
 	"time"
 
 	mclient "github.com/moby/moby/client"
+	ctypes "github.com/moby/moby/api/types/container"
 )
 
 type Container struct {
@@ -20,6 +22,21 @@ type Container struct {
 	State   string
 	Status  string
 	Ports   []Port
+}
+
+// Stats is a single resource-usage snapshot of a container. CPUPercent is
+// filled in by the caller: reliable percentages need a delta over a known
+// interval, computed from two consecutive samples (CPUNano/SystemNano)
+// scaled by OnlineCPUs.
+type Stats struct {
+	ID         string
+	CPUPercent float64
+	CPUNano    uint64
+	SystemNano uint64
+	OnlineCPUs uint32
+	MemUsage   uint64
+	MemLimit   uint64
+	MemPercent float64
 }
 
 type Port struct {
@@ -137,6 +154,36 @@ func (c *Client) ListContainers(all bool) ([]Container, error) {
 		})
 	}
 	return out, nil
+}
+
+// ContainerStats fetches a single one-shot resource-usage snapshot of the
+// container (the same data docker stats reports). Memory percent and the raw
+// CPU/clock counters are filled in; the caller computes the CPU percent from
+// the counters of two consecutive samples.
+func (c *Client) ContainerStats(id string) (*Stats, error) {
+	res, err := c.cli.ContainerStats(context.Background(), id, mclient.ContainerStatsOptions{
+		Stream: false,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	var raw ctypes.StatsResponse
+	if err := json.NewDecoder(res.Body).Decode(&raw); err != nil {
+		return nil, fmt.Errorf("decoding stats for %s: %w", id, err)
+	}
+
+	s := &Stats{ID: id}
+	s.CPUNano = raw.CPUStats.CPUUsage.TotalUsage
+	s.SystemNano = raw.CPUStats.SystemUsage
+	s.OnlineCPUs = raw.CPUStats.OnlineCPUs
+	s.MemUsage = raw.MemoryStats.Usage
+	s.MemLimit = raw.MemoryStats.Limit
+	if s.MemLimit > 0 {
+		s.MemPercent = 100 * float64(s.MemUsage) / float64(s.MemLimit)
+	}
+	return s, nil
 }
 
 func (c *Client) ListImages(all bool) ([]Image, error) {

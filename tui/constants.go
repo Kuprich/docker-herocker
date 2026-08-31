@@ -10,7 +10,9 @@ const (
 	tabBarHeight    = 3
 	subTabBarHeight = 3
 	helpBarHeight   = 1
-	splitRatio      = 0.50
+	// splitRatio is the fraction of the pane height given to the top (list)
+	// pane; the bottom Info/Logs submenu gets the remainder (70%).
+	splitRatio = 0.30
 
 	// refreshInterval is the period of the single global list auto-refresh
 	// ticker.
@@ -49,12 +51,18 @@ const (
 )
 
 // Column boundaries of the container list row layout:
-// " %s  %-29s %-11s  %-32s  %-34s"
+// " %s  %-29s %-11s  %7s   %13s   %-20s  %-22s"
 const (
 	stateCol = 34 // 1 space + dot + 2 spaces + name(29) + gap
-	imageCol = 47 // state(11) + 2 gaps
-	portsCol = 81 // image(32) + 2 gaps
+	cpuCol   = 47 // state(11) + 2 gaps
+	memCol   = 57 // cpu(7) + 3 gaps
+	imageCol = 73 // mem(13) + 3 gaps
+	portsCol = 95 // image(20) + 2 gaps
 )
+
+// memUsageColor highlights the used-portion of the MEM column, matching the
+// published-host-port highlight so it reads as the same "live" metric.
+const memUsageColor = lipgloss.Color("#f5a742")
 
 var errorStyle = lipgloss.NewStyle().
 	Foreground(t.Error).

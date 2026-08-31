@@ -11,13 +11,18 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
-// menuItem is a single action in the container context menu. activate
+// menuItem is a single action in the container context menu. key is the
+// single-letter hotkey shown highlighted right before the label. activate
 // returns the tea.Cmd to dispatch (nil keeps the popup open). confirm marks
 // a staging item (Remove variants) whose activation swaps the popup into the
 // destructive-action confirm stage instead of dispatching anything;
 // removeVolumes selects the variant that removes the container with its data.
+// children, when non-empty, turn the item into a submenu parent: activating
+// it pushes the current level onto the popup's stack and shows its children.
 type menuItem struct {
 	label         string
+	key           string
+	children      []menuItem
 	confirm       bool
 	removeVolumes bool // pairs with confirm: "Remove with data" variant
 	activate      func() tea.Cmd
@@ -26,8 +31,11 @@ type menuItem struct {
 // popupMenu is the container context menu, centered on the screen. x,y holds
 // the 0-based cell of its top-left corner; w,h its box size in cells (already
 // clamped to the terminal). confirm marks the second, destructive stage.
+// stack holds the parent item lists of any open submenu (deepest last) so Esc
+// can walk back up to the root instead of instantly closing.
 type popupMenu struct {
 	items   []menuItem
+	stack   [][]menuItem
 	x, y    int
 	w, h    int
 	sel     int
@@ -41,27 +49,37 @@ type popupMenu struct {
 const menuMinWidth = 16
 
 // containerMenuItems builds the first-stage actions for a container: a
-// state-dependent Stop/Pause or Start/Resume, plus the (confirmed) Remove and
-// Remove-with-data variants.
+// state-dependent Stop/Pause or Start, a restart in all states, plus a Remove
+// item that expands into a submenu (Remove and Remove-with-data variants).
+// Hotkeys are only meaningful at this top level; once the user drills into the
+// submenu or the confirm stage they disappear.
 func (m Model) containerMenuItems(c docker.Container) []menuItem {
 	var items []menuItem
 	switch c.State {
 	case "running":
 		items = append(items,
-			menuItem{label: "Stop", activate: m.toggleContainer},
-			menuItem{label: "Pause", activate: m.pauseContainer},
+			menuItem{label: "Stop", key: "s", activate: m.toggleContainer},
+			menuItem{label: "Pause", key: "p", activate: m.pauseContainer},
 		)
 	case "paused":
 		items = append(items,
-			menuItem{label: "Resume", activate: m.resumeContainer},
+			menuItem{label: "Resume", key: "r", activate: m.resumeContainer},
 		)
 	default:
-		items = append(items, menuItem{label: "Start", activate: m.toggleContainer})
+		items = append(items, menuItem{label: "Start", key: "s", activate: m.toggleContainer})
 	}
-	return append(items,
-		menuItem{label: "Remove", confirm: true},
-		menuItem{label: "Remove with data", confirm: true, removeVolumes: true},
+	items = append(items,
+		menuItem{label: "Restart", key: "r", activate: m.restartContainer},
 	)
+	remove := menuItem{
+		label: "Remove",
+		key:   "d",
+		children: []menuItem{
+			{label: "Remove", confirm: true},
+			{label: "Remove with data", confirm: true, removeVolumes: true},
+		},
+	}
+	return append(items, remove)
 }
 
 // enterRemoveConfirm swaps the popup into the destructive-action stage: a
@@ -73,6 +91,7 @@ func (m *Model) enterRemoveConfirm(withData bool) {
 	name := containerDisplayName(c)
 	m.menu.confirm = true
 	m.menu.sel = 0
+	m.menu.stack = nil
 	m.menu.header = "Remove " + name + "?"
 	if withData {
 		m.menu.header = "Remove " + name + " and its volumes?"
@@ -146,18 +165,25 @@ func (m Model) buildContainerMenu() popupMenu {
 	}
 }
 
-// menuMeasure computes the popup box size: 2 border columns plus the widest
-// label (or header), never narrower than menuMinWidth, plus one row per item
-// plus two border rows (and the optional header row).
 func menuMeasure(items []menuItem, header string) (w, h int) {
-	w = 2 // left + right border cells
+	w = 2               // left + right border cells
+	const hotkeyPad = 2 // "<letter> " prefix before each hotkeyed label
 	for _, it := range items {
-		if l := runewidth.StringWidth(it.label); l > w {
+		l := runewidth.StringWidth(it.label)
+		if it.key != "" {
+			l += hotkeyPad
+		}
+		if it.children != nil {
+			l += 2 // trailing submenu arrow " ›"
+		}
+		if l > w {
 			w = l
 		}
 	}
 	if header != "" {
-		if l := runewidth.StringWidth(header); l > w {
+		// the title row reserves a leading and a trailing cell of breathing
+		// room, so it is one wider than the header text itself.
+		if l := runewidth.StringWidth(header) + 2; l > w {
 			w = l
 		}
 	}
@@ -178,15 +204,36 @@ func (m Model) renderContainerMenu() []string {
 	iw := max(m.menu.w-2, 0)
 	rows := []string{MenuBoxStyle.Render("┌" + strings.Repeat("─", iw) + "┐")}
 	if m.menu.header != "" {
-		rows = append(rows, MenuBoxStyle.Render("│"+padMenuRunes(" "+m.menu.header, iw)+"│"))
+		// Reserve a leading and a trailing space in the title row so the text
+		// always sits clear of both borders (right gap of at least 1 cell).
+		rows = append(rows, MenuBoxStyle.Render("│"+padMenuRunes(" "+m.menu.header, max(iw-1, 0))+" "+"│"))
 		rows = append(rows, MenuBoxStyle.Render("│"+strings.Repeat("─", iw)+"│"))
 	}
 	for i, it := range m.menu.items {
 		style := MenuItemStyle
+		keyStyle := MenuKeyStyle
 		if i == m.menu.sel {
 			style = MenuActiveItemStyle
+			keyStyle = MenuActiveKeyStyle
 		}
-		rows = append(rows, MenuBoxStyle.Render("│"+style.Render(" "+padMenuRunes(it.label, iw-1)))+MenuBoxStyle.Render("│"))
+		label := it.label
+		if it.children != nil {
+			label += " ›"
+		}
+		// Item rows read "s Stop": a highlighted single hotkey letter (when
+		// any) then the right-padded label. Every segment — the surrounding
+		// spaces and the label — is its own Render on the row background, so
+		// no gap falls through to the default terminal background: only the
+		// letter itself carries the accent/hotkey foreground. Submenu and
+		// confirm levels carry no hotkey and render as plain rows.
+		var row string
+		if it.key != "" {
+			row = style.Render(" ") + keyStyle.Render(it.key) + style.Render(" ") +
+				style.Render(padMenuRunes(label, max(iw-3, 0)))
+		} else {
+			row = style.Render(" " + padMenuRunes(label, max(iw-1, 0)))
+		}
+		rows = append(rows, MenuBoxStyle.Render("│")+row+MenuBoxStyle.Render("│"))
 	}
 	rows = append(rows, MenuBoxStyle.Render("└"+strings.Repeat("─", iw)+"┘"))
 	return rows
@@ -213,12 +260,24 @@ func (m *Model) menuActivate(i int) tea.Cmd {
 		m.menuOpen = false
 		return nil
 	}
-	if m.menu.items[i].confirm {
-		m.enterRemoveConfirm(m.menu.items[i].removeVolumes)
+	it := m.menu.items[i]
+	// A parent with children is a submenu: push the current level onto the
+	// stack and show its children as the new level, reselecting the first.
+	if len(it.children) > 0 {
+		m.menu.stack = append(m.menu.stack, m.menu.items)
+		m.menu.items = it.children
+		m.menu.sel = 0
+		m.menu.w, m.menu.h = menuMeasure(m.menu.items, m.menu.header)
+		m.menu.x = max((m.width-m.menu.w)/2, 0)
+		m.menu.y = max((m.height-m.menu.h)/2, tabBarHeight+1)
+		return nil
+	}
+	if it.confirm {
+		m.enterRemoveConfirm(it.removeVolumes)
 		return nil
 	}
 	wasConfirm := m.menu.confirm
-	cmd := m.menu.items[i].activate()
+	cmd := it.activate()
 	switch {
 	case cmd != nil:
 		m.menuOpen = false
@@ -233,9 +292,26 @@ func (m *Model) menuActivate(i int) tea.Cmd {
 	}
 }
 
+// menuSubmenuBack walks one level up the submenu stack, or closes the popup
+// entirely when we are already at the root.
+func (m *Model) menuSubmenuBack() {
+	if n := len(m.menu.stack); n > 0 {
+		m.menu.items = m.menu.stack[n-1]
+		m.menu.stack = m.menu.stack[:n-1]
+		m.menu.sel = 0
+		m.menu.w, m.menu.h = menuMeasure(m.menu.items, m.menu.header)
+		m.menu.x = max((m.width-m.menu.w)/2, 0)
+		m.menu.y = max((m.height-m.menu.h)/2, tabBarHeight+1)
+		return
+	}
+	m.menuOpen = false
+}
+
 // handleMenuKey processes a keystroke while the popup is open. handled=false
 // (Quit only) lets the caller's normal key handling proceed so ctrl+c/q still
-// quits the app; every other key closes the menu and is swallowed.
+// quits the app; every other key closes the menu and is swallowed. A typed
+// single letter that matches an item's hotkey activates that item right away;
+// Esc closes an open submenu (back to its parent) before closing the popup.
 func (m Model) handleMenuKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	switch {
 	case key.Matches(msg, keys.Up):
@@ -251,10 +327,20 @@ func (m Model) handleMenuKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	case msg.String() == "enter":
 		return m, m.menuActivate(m.menu.sel), true
 	case key.Matches(msg, keys.Back):
-		m.menuOpen = false
+		m.menuSubmenuBack()
 		return m, nil, true
 	case key.Matches(msg, keys.Quit):
 		return m, nil, false
+	case len(msg.Runes) == 1:
+		k := string(msg.Runes[0])
+		for i, it := range m.menu.items {
+			if strings.EqualFold(it.key, k) {
+				m.menu.sel = i
+				return m, m.menuActivate(i), true
+			}
+		}
+		m.menuOpen = false
+		return m, nil, true
 	default:
 		m.menuOpen = false
 		return m, nil, true

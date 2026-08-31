@@ -262,6 +262,121 @@ func TestTruncateHandlesMultibyteSafely(tt *testing.T) {
 	}
 }
 
+func TestFormatCPU(tt *testing.T) {
+	cases := map[float64]string{
+		0:     "0.00%",
+		0.5:   "0.50%",
+		5.25:  "5.25%",
+		12:    "12.0%",
+		99.96: "100.0%",
+		2000:  "999.9%",
+		-3:    "0.00%",
+	}
+	for in, want := range cases {
+		if got := formatCPU(in); got != want {
+			tt.Errorf("formatCPU(%v) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestFormatMem(tt *testing.T) {
+	if got := formatMem(0, 0); got != "0B/—" {
+		tt.Errorf("formatMem(0,0) = %q", got)
+	}
+	if got := formatMem(1536, 1024); got != "1.5K/1.0K" {
+		tt.Errorf("formatMem(1536,1024) = %q", got)
+	}
+	if got := formatMem(330<<20, 16<<30); got != "330.0M/16.0G" {
+		tt.Errorf("formatMem(330MiB,16GiB) = %q", got)
+	}
+	if got := formatBytes(999); got != "999B" {
+		tt.Errorf("formatBytes(999) = %q", got)
+	}
+}
+
+func TestCPUPercentFrom(tt *testing.T) {
+	s := docker.Stats{CPUNano: 200, SystemNano: 2000, OnlineCPUs: 4}
+	prev := &statsSample{cpu: 100, sys: 1000}
+	want := 100 * 100.0 / 1000.0 * 4
+	if got := cpuPercentFrom(s, prev); abs(got-want) > 1e-9 {
+		tt.Errorf("cpuPercentFrom = %v, want %v", got, want)
+	}
+	if got := cpuPercentFrom(s, nil); got != 0 {
+		tt.Errorf("cpuPercentFrom(nil prev) = %v, want 0", got)
+	}
+	if got := cpuPercentFrom(docker.Stats{OnlineCPUs: 4}, prev); got != 0 {
+		tt.Errorf("cpuPercentFrom no delta = %v, want 0", got)
+	}
+}
+
+func abs(f float64) float64 {
+	if f < 0 {
+		return -f
+	}
+	return f
+}
+
+func TestContainerListRowMetricsColumns(tt *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	tt.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+
+	m := New(nil)
+	m.width = 140
+	m.height = 30
+	m.ready = true
+	m.loading = false
+	m.containers = makeTestContainers(3)
+	m.fitMainViewport()
+
+	hdr, rows := m.renderContainerList(innerW(m.width), innerW(m.width)-1, m.height-tabBarHeight-helpBarHeight)
+	if !strings.Contains(hdr, "CPU %") || !strings.Contains(hdr, "MEM") {
+		tt.Errorf("header missing metrics columns: %q", hdr)
+	}
+	plain := strings.Split(stripANSI(rows), "\n")
+
+	// Without snapshots every metrics cell is a dash at its fixed offset.
+	for i, line := range plain {
+		runes := []rune(line)
+		if string(runes[cpuCol:cpuCol+7]) != "      —" {
+			tt.Errorf("row %d cpu dash at %d: %q", i, cpuCol, string(runes[cpuCol:cpuCol+7]))
+		}
+		if string(runes[memCol:memCol+13]) != "            —" {
+			tt.Errorf("row %d mem dash at %d: %q", i, memCol, string(runes[memCol:memCol+13]))
+		}
+	}
+
+	// With a snapshot the running container shows live values.
+	first := m.containers[0].ID
+	m.stats[first] = docker.Stats{ID: first, CPUPercent: 5.25, MemUsage: 330 << 20, MemLimit: 16 << 30}
+	_, rows = m.renderContainerList(innerW(m.width), innerW(m.width)-1, m.height-tabBarHeight-helpBarHeight)
+	line := strings.Split(stripANSI(rows), "\n")[0]
+	if !strings.Contains(line, "5.25%") || !strings.Contains(line, "330.0M/16.0G") {
+		tt.Errorf("running row missing metrics: %q", line)
+	}
+	// The used-memory value must carry the orange usage SGR, the limit must not.
+	if !strings.Contains(rows, "245;167;65") {
+		tt.Errorf("used memory is not painted with the usage color:\n%q", rows[:400])
+	}
+
+	// IMAGE column must land on the same column whether MEM is a short dash
+	// (no data) or a full usage/limit pair, so the "image" boundary never
+	// shifts between stopped and running rows.
+	imgPos := func(rowRunes []rune) int {
+		for i := imageCol; i < len(rowRunes); i++ {
+			if rowRunes[i] != ' ' {
+				return i
+			}
+		}
+		return -1
+	}
+	dashRow := strings.Split(stripANSI(rows), "\n")[1] // exited row with "—"
+	valRow := strings.Split(stripANSI(rows), "\n")[0]  // running row with real values
+	if dp, vp := imgPos([]rune(dashRow)), imgPos([]rune(valRow)); dp != -1 && vp != -1 && dp != vp {
+		tt.Errorf("IMAGE column shifted: dash row at %d, value row at %d", dp, vp)
+	}
+}
+
 // makeTestContainers builds n synthetic running containers.
 func makeTestContainers(n int) []docker.Container {
 	out := make([]docker.Container, 0, n)
@@ -546,6 +661,12 @@ func TestContainerLogMsgIncrementalAppends(tt *testing.T) {
 	if !strings.Contains(next.containerLogContent, "alpha") || !strings.Contains(next.containerLogContent, "beta") {
 		tt.Errorf("incremental content not appended: %q", next.containerLogContent)
 	}
+	if strings.Contains(next.containerLogContent, "2026-") {
+		tt.Errorf("stored log buffer must drop the RFC3339Nano prefix: %q", next.containerLogContent)
+	}
+	if !strings.Contains(next.containerLogContent, "13:07:03") {
+		tt.Errorf("stored log buffer should carry the compact HH:MM:SS time: %q", next.containerLogContent)
+	}
 	wantTS, _ := time.Parse(time.RFC3339Nano, "2026-08-28T13:07:03.200000001Z")
 	if !next.containerLogLastTS.Equal(wantTS) {
 		tt.Errorf("cursor = %v, want %v", next.containerLogLastTS, wantTS)
@@ -615,6 +736,60 @@ func TestContainerLogCursor(tt *testing.T) {
 	if _, ok := containerLogCursor(""); ok {
 		tt.Error("empty content must report ok=false")
 	}
+}
+
+func TestReformatLogTimestamps(tt *testing.T) {
+	cases := []struct{ in, want string }{
+		{
+			"2026-08-28T13:07:03.100000001Z alpha\n2026-08-28T13:07:03.200000001Z beta\n",
+			"13:07:03 alpha\n13:07:03 beta\n",
+		},
+		// bare timestamp line (no text after it) becomes just the time
+		{"2026-08-28T13:07:03.100000001Z\n", "13:07:03\n"},
+		// lines without a docker timestamp are left untouched
+		{"just some text\nmore text\n", "just some text\nmore text\n"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := reformatLogTimestamps(c.in); got != c.want {
+			tt.Errorf("reformatLogTimestamps(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestLogTimestampLen(tt *testing.T) {
+	if n := logTimestampLen("13:07:03 alpha"); n != 9 {
+		tt.Errorf("logTimestampLen(hh:mm:ss line) = %d, want 9", n)
+	}
+	if n := logTimestampLen("no time here"); n != 0 {
+		tt.Errorf("logTimestampLen(no prefix) = %d, want 0", n)
+	}
+	if n := logTimestampLen("13:07:03"); n != 0 { // no trailing space
+		tt.Errorf("logTimestampLen(bare time) = %d, want 0", n)
+	}
+	if n := logTimestampLen("13:07 03 y"); n != 0 { // not HH:MM:SS shape
+		tt.Errorf("logTimestampLen(malformed) = %d, want 0", n)
+	}
+}
+
+func TestStyleLogRowsMutesTimestamp(tt *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	tt.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+
+	content := "13:07:03 alpha\n13:07:04 beta"
+	out := styleLogRows(content, textSel{}, 20, 10, 0)
+	lines := strings.Split(out, "\n")
+	// The timestamp digits must carry the muted SGR, the message must not.
+	first := lines[0]
+	muted := "38;2;139;147;158" // t.Muted = #8b949e
+	if !strings.Contains(first, muted) {
+		tt.Errorf("timestamp not muted in: %q", first)
+	}
+	if strings.Contains(styleLogRows("alpha\nbeta", textSel{}, 20, 10, 0), muted) {
+		tt.Errorf("plain log line should not be muted")
+	}
+	_ = lines
 }
 
 func TestFollowToggleKey(tt *testing.T) {
@@ -931,19 +1106,19 @@ func TestInfoDragSelectsAndCopies(tt *testing.T) {
 	}
 	// Info content band starts right under the sub-tab strip: screen y=19 is
 	// buffer row 0 (" Info:"), y=20 -> row 1, y=22 -> row 3.
-	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 20}
+	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 14}
 	next := testMouseUpdate(m, press)
 	if !next.detailDragSel {
 		tt.Fatal("press in the Info body should start a drag")
 	}
-	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 30, Y: 22})
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 30, Y: 16})
 	if next.detailSel.endR != 3 {
 		tt.Errorf("Info drag end row = %d, want 3", next.detailSel.endR)
 	}
 	if next.detailSel.endC < 0 || next.detailSel.endC >= len([]rune(strings.Split(next.detailContent, "\n")[3])) {
 		tt.Errorf("Info drag end col = %d out of row bounds", next.detailSel.endC)
 	}
-	next, cmd := testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 30, Y: 22})
+	next, cmd := testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 30, Y: 16})
 	if next.detailSel.active {
 		tt.Fatal("release should clear the Info selection (text was copied)")
 	}
@@ -952,8 +1127,8 @@ func TestInfoDragSelectsAndCopies(tt *testing.T) {
 	}
 
 	// a plain click clears the Info selection
-	next = testMouseUpdate(detailTestModel(), tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 20})
-	next, cmd = testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 1, Y: 20})
+	next = testMouseUpdate(detailTestModel(), tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 14})
+	next, cmd = testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 1, Y: 14})
 	if next.detailSel.active {
 		tt.Error("plain click must not finalize an Info selection")
 	}
@@ -1201,10 +1376,29 @@ func TestStyleLogRowsPaintsThemeEverywhere(tt *testing.T) {
 	})
 }
 
+func TestStyleLogRowsKeepsTimeSpace(tt *testing.T) {
+	withTrueColor(tt, func() {
+		line := "16:46:11 value.deserializer = class X"
+		// Non-selected: exactly one space must separate time from text.
+		out := styleLogRows(line, textSel{}, 120, 4, 0)
+		plain := strings.TrimRight(stripANSI(strings.Split(out, "\n")[0]), " ")
+		if plain != line {
+			tt.Errorf("unselected row altered text: %q, want %q", plain, line)
+		}
+		// Selected across a middle band: the space must still be there.
+		sel := textSel{active: true, anR: 0, anC: 12, endR: 0, endC: 20}
+		out2 := styleLogRows(line, sel, 120, 4, 0)
+		plain2 := strings.TrimRight(stripANSI(strings.Split(out2, "\n")[0]), " ")
+		if plain2 != line {
+			tt.Errorf("selected row altered text: %q, want %q", plain2, line)
+		}
+	})
+}
+
 func TestLogDragSelectsAcrossRows(tt *testing.T) {
 	m := logTestModel()
 	// viewport row 0 == buffer row 1 (YOffset=1), content band starts at y=21
-	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21}
+	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 15}
 	_ = press
 	next := testMouseUpdate(m, press)
 	if !next.dragSel {
@@ -1214,13 +1408,13 @@ func TestLogDragSelectsAcrossRows(tt *testing.T) {
 		tt.Errorf("anchor = (%d,%d), want buffer (1,0)", next.logSel.anR, next.logSel.anC)
 	}
 
-	motion := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 23}
+	motion := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 17}
 	next = testMouseUpdate(next, motion)
 	if next.logSel.endR != 3 || next.logSel.endC != 3 {
 		tt.Errorf("end = (%d,%d), want (3,3)", next.logSel.endR, next.logSel.endC)
 	}
 
-	release := tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 4, Y: 23}
+	release := tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 4, Y: 17}
 	next, cmd := testUpdate(next, release)
 	if next.dragSel {
 		tt.Error("release should end the drag")
@@ -1237,12 +1431,12 @@ func TestLogClickClearsSelection(tt *testing.T) {
 	m := logTestModel()
 	m.logSel = textSel{active: true, anR: 0, anC: 0, endR: 4, endC: 3}
 
-	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 22}
+	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 16}
 	next := testMouseUpdate(m, press)
 	if !next.dragSel {
 		tt.Fatal("press should start a fresh drag")
 	}
-	release := tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 1, Y: 22}
+	release := tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 1, Y: 16}
 	next = testMouseUpdate(next, release)
 	if next.dragSel {
 		tt.Error("release should end the drag")
@@ -1339,12 +1533,12 @@ func TestLogSlowDragSurvivesIdenticalReload(tt *testing.T) {
 	// its cursor goes stale. A slow drag that has a tick land mid-drag must
 	// not be destroyed by that reload.
 	m := logTestModel()
-	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21}
+	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 15}
 	next := testMouseUpdate(m, press)
 	if !next.dragSel {
 		tt.Fatal("press should start a drag")
 	}
-	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 22})
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 16})
 	if next.logSel.endR != 2 {
 		tt.Fatalf("motion end row = %d, want 2", next.logSel.endR)
 	}
@@ -1361,11 +1555,11 @@ func TestLogSlowDragSurvivesIdenticalReload(tt *testing.T) {
 	}
 
 	// continued motion after the tick must still extend the drag
-	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 23})
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 17})
 	if next.logSel.endR != 3 {
 		tt.Errorf("motion after tick end row = %d, want 3", next.logSel.endR)
 	}
-	next, cmd := testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 4, Y: 23})
+	next, cmd := testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 4, Y: 17})
 	if next.logSel.active {
 		tt.Error("release should clear the highlight (text was copied)")
 	}
@@ -1378,12 +1572,12 @@ func TestLogInFlightDragDroppedOnChangedReload(tt *testing.T) {
 	// A genuinely different full reload (container recreated, log rotated)
 	// mid-drag cancels the drag: the old rows no longer exist.
 	m := logTestModel()
-	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21}
+	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 15}
 	next := testMouseUpdate(m, press)
 	if !next.dragSel {
 		tt.Fatal("press should start a drag")
 	}
-	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 23})
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 17})
 	next = testMouseUpdate(next, containerLogMsg{id: next.containers[next.selectedIdx].ID, content: "totally\ndifferent\nlog"})
 	if next.dragSel || next.logSel.active {
 		tt.Error("changed full reload should cancel the in-flight drag")
@@ -1408,9 +1602,9 @@ func TestOsc52Sequence(tt *testing.T) {
 
 func TestLogReleaseAutoCopiesSelection(tt *testing.T) {
 	m := logTestModel()
-	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21})
-	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 23})
-	next, cmd := testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 4, Y: 23})
+	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 15})
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 17})
+	next, cmd := testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 4, Y: 17})
 	if next.logSel.active {
 		tt.Fatal("release of a real drag should clear the selection (text was copied)")
 	}
@@ -1418,8 +1612,8 @@ func TestLogReleaseAutoCopiesSelection(tt *testing.T) {
 		tt.Error("non-trivial release should return an OSC 52 copy command")
 	}
 	// a plain click (release on the same cell) must not auto-copy
-	next = testMouseUpdate(logTestModel(), tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21})
-	next, cmd = testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 1, Y: 21})
+	next = testMouseUpdate(logTestModel(), tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 15})
+	next, cmd = testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 1, Y: 15})
 	if next.logSel.active {
 		tt.Fatal("plain click must not finalize an active selection")
 	}
@@ -1430,8 +1624,8 @@ func TestLogReleaseAutoCopiesSelection(tt *testing.T) {
 
 func TestCopyKeyCopiesFinalizedSelection(tt *testing.T) {
 	m := logTestModel()
-	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21})
-	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 22})
+	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 15})
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 16})
 	// a lost release (timeout) keeps the selection active so y can copy it
 	next, _ = testUpdate(next, dragTimeoutMsg{gen: next.dragGen})
 	if !next.logSel.active {
@@ -1446,9 +1640,9 @@ func TestCopyKeyCopiesFinalizedSelection(tt *testing.T) {
 		tt.Error("y without a selection should return no command")
 	}
 	// a completed drag resets immediately: y right after must be a no-op
-	next2 := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21})
-	next2 = testMouseUpdate(next2, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 22})
-	next2 = testMouseUpdate(next2, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 4, Y: 22})
+	next2 := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 15})
+	next2 = testMouseUpdate(next2, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 16})
+	next2 = testMouseUpdate(next2, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 4, Y: 16})
 	if next2.logSel.active {
 		tt.Fatal("completed drag should have cleared the selection")
 	}
@@ -1514,8 +1708,8 @@ func TestWheelStillScrollsLogsWithSelection(tt *testing.T) {
 
 func TestLogSelectionSurvivesScroll(tt *testing.T) {
 	m := logTestModel()
-	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21}
-	motion := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 23}
+	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 15}
+	motion := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 17}
 	m = testMouseUpdate(testMouseUpdate(m, press), motion)
 	// a lost release (timeout) leaves the buffer-anchored selection active
 	next, _ := testUpdate(m, dragTimeoutMsg{gen: m.dragGen})
@@ -1558,12 +1752,12 @@ func TestViewHeightMatchesTerminal(tt *testing.T) {
 // must be snapped into a final selection WITHOUT auto-copying.
 func TestLogDragTimeoutFinalizes(tt *testing.T) {
 	m := logTestModel()
-	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21}
+	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 15}
 	next := testMouseUpdate(m, press)
 	if !next.dragSel {
 		tt.Fatal("press should start a drag")
 	}
-	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 23})
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 17})
 
 	next, cmd := testUpdate(next, dragTimeoutMsg{gen: next.dragGen})
 	if next.dragSel {
@@ -1584,10 +1778,10 @@ func TestLogDragTimeoutFinalizes(tt *testing.T) {
 // generation cannot kill a fresher drag.
 func TestDragTimeoutStaleGenIgnored(tt *testing.T) {
 	m := logTestModel()
-	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21}
+	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 15}
 	next := testMouseUpdate(m, press)
 	gen0 := next.dragGen
-	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 23})
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 17})
 
 	if _, cmd := testUpdate(next, dragTimeoutMsg{gen: gen0}); cmd != nil {
 		tt.Error("stale timeout returned a cmd")
@@ -1606,8 +1800,8 @@ func TestDragTimeoutStaleGenIgnored(tt *testing.T) {
 	}
 
 	// a plain release after finalization still ends any new drag normally
-	next = testMouseUpdate(detailTestModel(), tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 20})
-	next, cmd = testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 1, Y: 20})
+	next = testMouseUpdate(detailTestModel(), tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 14})
+	next, cmd = testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 1, Y: 14})
 	if cmd != nil || next.detailDragSel {
 		tt.Error("plain Info click must not copy or leave a drag")
 	}
@@ -1616,12 +1810,12 @@ func TestDragTimeoutStaleGenIgnored(tt *testing.T) {
 // TestInfoDragTimeoutFinalizes mirrors the Logs timeout for the Info pane.
 func TestInfoDragTimeoutFinalizes(tt *testing.T) {
 	m := detailTestModel()
-	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 20}
+	press := tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 14}
 	next := testMouseUpdate(m, press)
 	if !next.detailDragSel {
 		tt.Fatal("press in the Info body should start a drag")
 	}
-	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 30, Y: 22})
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 30, Y: 16})
 
 	next, cmd := testUpdate(next, dragTimeoutMsg{gen: next.dragGen})
 	if next.detailDragSel {
@@ -1640,9 +1834,9 @@ func TestInfoDragTimeoutFinalizes(tt *testing.T) {
 
 func TestCopyToastArmedOnRelease(tt *testing.T) {
 	m := detailTestModel()
-	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 20})
-	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 30, Y: 22})
-	released, cmd := testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 30, Y: 22})
+	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 14})
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 30, Y: 16})
+	released, cmd := testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 30, Y: 16})
 	if cmd == nil {
 		tt.Error("drag release should return the copy command")
 	}
@@ -1664,8 +1858,8 @@ func TestCopyToastArmedOnRelease(tt *testing.T) {
 
 func TestCopyToastViaCopyKey(tt *testing.T) {
 	m := logTestModel()
-	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 21})
-	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 22})
+	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 15})
+	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 16})
 	// lost release (timeout) keeps the selection active for a manual copy
 	next, _ = testUpdate(next, dragTimeoutMsg{gen: next.dragGen})
 	if !next.logSel.active {
@@ -1687,8 +1881,8 @@ func TestCopyToastViaCopyKey(tt *testing.T) {
 
 func TestCopyToastNotOnPlainClick(tt *testing.T) {
 	m := detailTestModel()
-	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 20})
-	cl, cmd := testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 1, Y: 20})
+	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 14})
+	cl, cmd := testUpdate(next, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 1, Y: 14})
 	if cmd != nil {
 		tt.Error("plain click should not copy")
 	}
@@ -1727,17 +1921,30 @@ func TestRenderContainerMenuShape(tt *testing.T) {
 	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[2]), "│")); strings.ReplaceAll(got, "─", "") != "" {
 		tt.Errorf("separator row = %q, want a full-width ─ rule", got)
 	}
-	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[3]), "│")); got != "Stop" {
-		tt.Errorf("first item = %q, want a Stop row for a running container", got)
+	// running container -> 4 items: Stop, Pause, Restart, Remove(submenu)
+	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[3]), "│")); got != "s Stop" {
+		tt.Errorf("first item = %q, want a s Stop row for a running container", got)
 	}
-	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[4]), "│")); got != "Pause" {
-		tt.Errorf("second item = %q, want a Pause row for a running container", got)
+	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[4]), "│")); got != "p Pause" {
+		tt.Errorf("second item = %q, want a p Pause row for a running container", got)
 	}
-	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[5]), "│")); got != "Remove" {
-		tt.Errorf("third item = %q, want Remove", got)
+	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[5]), "│")); got != "r Restart" {
+		tt.Errorf("third item = %q, want a r Restart row", got)
 	}
-	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[6]), "│")); got != "Remove with data" {
-		tt.Errorf("fourth item = %q, want Remove with data", got)
+	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[6]), "│")); got != "d Remove ›" {
+		tt.Errorf("fourth item = %q, want a d Remove submenu row", got)
+	}
+	if len(rows) != 8 {
+		tt.Errorf("menu rows = %d, want 8 (4 items + header + borders)", len(rows))
+	}
+
+	// the hotkey on the selected row is white (readable on the green
+	// background); the hotkeys on the unselected rows are accent green
+	if !strings.Contains(rows[3], "38;2;230;237;243") {
+		tt.Errorf("selected row hotkey should be bright white (230;237;243):\n%s", rows[3])
+	}
+	if !strings.Contains(rows[4], "38;2;63;185;80") {
+		tt.Errorf("unselected row hotkey should be accent green (63;185;80):\n%s", rows[4])
 	}
 
 	// the selected row (sel=0) is inverted with the accent background; the
@@ -1746,14 +1953,10 @@ func TestRenderContainerMenuShape(tt *testing.T) {
 	if !strings.Contains(rows[3], activeBG) {
 		tt.Error("selected menu row must carry the accent background")
 	}
-	if strings.Contains(rows[4], activeBG) {
-		tt.Error("unselected menu row must not carry the accent background")
-	}
-	if strings.Contains(rows[5], activeBG) {
-		tt.Error("unselected menu row must not carry the accent background")
-	}
-	if strings.Contains(rows[6], activeBG) {
-		tt.Error("unselected menu row must not carry the accent background")
+	for _, r := range rows[4:7] {
+		if strings.Contains(r, activeBG) {
+			tt.Error("unselected menu row must not carry the accent background")
+		}
 	}
 
 	// the box is centered within the terminal, clear of the tab bar
@@ -1885,7 +2088,7 @@ func TestMenuNavigationAndEsc(tt *testing.T) {
 	// a stray key closes the popup and is swallowed: it must not leak into
 	// the normal key handling (restart would run, selection would move)
 	m = openMenuFor(detailTestModel(), 0)
-	next, _ = testUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	next, _ = testUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z")})
 	if next.menuOpen {
 		tt.Fatal("a stray key should close the popup")
 	}
@@ -1922,20 +2125,37 @@ func TestMenuClickOutsideCloses(tt *testing.T) {
 	m = openMenuFor(m, 0)
 
 	// left-click on the Remove item (running: title + separator + Stop + Pause
-	// above it, plus the top border) activates it and keeps the popup open in
-	// the confirm stage
-	itemY := m.menu.y + 5 + 1 // 0-based row -> 1-based mouse Y
+	// above it, plus the top border) opens the Remove submenu and keeps the
+	// popup open in the first stage
+	itemY := m.menu.y + 6 + 1 // 0-based row -> 1-based mouse Y
 	itemX := m.menu.x + 3 + 1
 	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: itemX, Y: itemY})
 	if !next.menuOpen {
-		tt.Fatal("click on the Remove item should keep the popup open (confirm stage)")
+		tt.Fatal("click on the Remove item should keep the popup open")
 	}
-	if !next.menu.confirm {
-		tt.Fatal("Remove activation should enter the confirm stage")
+	if next.menu.confirm {
+		tt.Fatal("Remove activation should open the submenu, not the confirm stage")
+	}
+	if len(next.menu.items) != 2 {
+		tt.Fatalf("Remove submenu have %d items, want 2", len(next.menu.items))
+	}
+	if got := next.menu.items[0].label; got != "Remove" {
+		tt.Errorf("submenu first = %q, want Remove", got)
+	}
+	if got := next.menu.items[1].label; got != "Remove with data" {
+		tt.Errorf("submenu second = %q, want Remove with data", got)
+	}
+	// Esc backs out of the submenu to the root without closing
+	next = testMouseUpdate(next, tea.KeyMsg{Type: tea.KeyEsc})
+	if !next.menuOpen {
+		tt.Fatal("Esc in the submenu should return to the root, not close")
+	}
+	if len(next.menu.items) != 4 {
+		tt.Fatalf("back to root should restore %d items, got %d", 4, len(next.menu.items))
 	}
 
 	// left-click clearly outside the box (right and below) closes the popup;
-	// the confirm stage widened the box, so measure against next's geometry
+	// measure against next's geometry
 	outX := next.menu.x + next.menu.w + 1
 	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: outX, Y: next.menu.y + next.menu.h + 1})
 	if next.menuOpen {
@@ -1964,18 +2184,18 @@ func TestMenuRemoveFlows(tt *testing.T) {
 		return openMenuFor(detailTestModel(), idx)
 	}
 
-	// plain Remove: down to it (past Pause), Enter stages the confirm, Enter
-	// confirms Yes
-	m := openAt(0) // row 0
-	next, cmd := testUpdate(m, down)
-	if next.menu.sel != 1 {
-		tt.Fatalf("down = %d, want Pause at 1", next.menu.sel)
+	// open the Remove submenu via the d hotkey
+	openSub := func(m Model) Model {
+		next, _ := testUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+		return next
 	}
-	next, cmd = testUpdate(next, down)
-	if next.menu.sel != 2 {
-		tt.Fatalf("down = %d, want Remove at 2", next.menu.sel)
+
+	// plain Remove: open submenu, Enter on Remove, Enter confirms Yes
+	next := openSub(openAt(0))
+	if len(next.menu.items) != 2 {
+		tt.Fatalf("submenu items = %d, want 2", len(next.menu.items))
 	}
-	next, cmd = testUpdate(next, enter)
+	next, cmd := testUpdate(next, enter)
 	if !next.menu.confirm {
 		tt.Fatal("Enter on Remove should stage the confirm")
 	}
@@ -1994,9 +2214,7 @@ func TestMenuRemoveFlows(tt *testing.T) {
 	}
 
 	// Escape in the confirm stage cancels without dispatching
-	m = openAt(0)
-	next, _ = testUpdate(m, down)
-	next, _ = testUpdate(next, down)
+	next = openSub(openAt(0))
 	next, _ = testUpdate(next, enter)
 	next, cmd = testUpdate(next, tea.KeyMsg{Type: tea.KeyEsc})
 	if next.menuOpen {
@@ -2007,9 +2225,7 @@ func TestMenuRemoveFlows(tt *testing.T) {
 	}
 
 	// "No, cancel" closes the popup without dispatching
-	m = openAt(0)
-	next, _ = testUpdate(m, down)
-	next, _ = testUpdate(next, down)
+	next = openSub(openAt(0))
 	next, _ = testUpdate(next, enter)
 	next, _ = testUpdate(next, down) // sel moves to "No, cancel"
 	if got := next.menu.items[next.menu.sel].label; got != "No, cancel" {
@@ -2023,14 +2239,12 @@ func TestMenuRemoveFlows(tt *testing.T) {
 		tt.Error("No, cancel must not dispatch a command")
 	}
 
-	// Remove with data: down three times, Enter, confirm header mentions
-	// volumes
-	m = openAt(0)
-	next, _ = testUpdate(m, down)
+	// Remove with data: open submenu, down to it, Enter, confirm header
+	// mentions volumes
+	next = openSub(openAt(0))
 	next, _ = testUpdate(next, down)
-	next, _ = testUpdate(next, down)
-	if next.menu.sel != 3 {
-		tt.Fatalf("down down down = %d, want Remove with data at 3", next.menu.sel)
+	if got := next.menu.items[next.menu.sel].label; got != "Remove with data" {
+		tt.Fatalf("down in submenu = %d (%q)", next.menu.sel, got)
 	}
 	next, _ = testUpdate(next, enter)
 	if !next.menu.confirm {
@@ -2045,6 +2259,16 @@ func TestMenuRemoveFlows(tt *testing.T) {
 	}
 	if cmd == nil {
 		tt.Error("Yes must dispatch the remove-with-data command")
+	}
+
+	// once drilled into the submenu, hotkeys are gone: d does nothing there
+	next = openSub(openAt(0))
+	if got := next.menu.items[0].key; got != "" {
+		tt.Fatalf("submenu should carry no hotkeys, got %q", got)
+	}
+	next, _ = testUpdate(next, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	if next.menu.confirm {
+		tt.Fatal("a stray d inside the submenu should not stage a confirm")
 	}
 }
 
@@ -2069,8 +2293,11 @@ func TestKeyXOpensContextMenu(tt *testing.T) {
 	if got := next.menu.items[0].label; got != "Start" {
 		tt.Errorf("first item = %q, want Start for the restarting container", got)
 	}
-	if got := next.menu.items[2].label; got != "Remove with data" {
-		tt.Errorf("third item = %q", got)
+	if got := next.menu.items[2].label; got != "Remove" {
+		tt.Errorf("third item = %q, want the Remove submenu", got)
+	}
+	if got := next.menu.items[2].children[1].label; got != "Remove with data" {
+		tt.Errorf("Remove submenu second = %q, want Remove with data", got)
 	}
 	if got := next.menu.header; got != "Actions for container test-container-2" {
 		tt.Errorf("menu title = %q", got)
@@ -2122,7 +2349,7 @@ func TestMenuPauseResume(tt *testing.T) {
 	m.containers = makeTestContainers(3)
 	m.fitViewports()
 	open := openMenuFor(m, 0)
-	for i, want := range []string{"Stop", "Pause", "Remove", "Remove with data"} {
+	for i, want := range []string{"Stop", "Pause", "Restart", "Remove"} {
 		if got := open.menu.items[i].label; got != want {
 			tt.Errorf("running item %d = %q, want %q", i, got, want)
 		}

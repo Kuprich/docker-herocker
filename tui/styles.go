@@ -44,6 +44,21 @@ var MenuActiveItemStyle = lipgloss.NewStyle().
 	Foreground(t.Background).
 	Bold(true)
 
+// MenuKeyStyle paints the single-letter hotkey inside a menu row, using the
+// accent green on the surface so it pops against the row text.
+var MenuKeyStyle = lipgloss.NewStyle().
+	Background(t.Surface).
+	Foreground(t.Accent)
+
+// MenuActiveKeyStyle is the hotkey on the selected row. The selected row uses
+// an inverted-green background, so a green or amber letter would vanish (green
+// on green). A bright white letter keeps the key readable and distinct from
+// the dark label text on that row.
+var MenuActiveKeyStyle = lipgloss.NewStyle().
+	Background(lipgloss.Color("#2ea043")).
+	Foreground(t.Foreground).
+	Bold(true)
+
 var (
 	BaseStyle = lipgloss.NewStyle().
 			Background(t.Background).
