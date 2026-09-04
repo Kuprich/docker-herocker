@@ -22,9 +22,10 @@ import (
 type menuItem struct {
 	label         string
 	key           string
+	cli           string // equivalent docker CLI command (shown right-aligned, no target for bulk actions)
 	children      []menuItem
 	confirm       bool
-	removeVolumes bool // pairs with confirm: "Remove with data" variant
+	removeVolumes bool   // pairs with confirm: "Remove with data" variant
 	confirmHeader string // confirm-stage header (used outside the Containers tab)
 	activate      func() tea.Cmd
 }
@@ -35,13 +36,15 @@ type menuItem struct {
 // stack holds the parent item lists of any open submenu (deepest last) so Esc
 // can walk back up to the root instead of instantly closing.
 type popupMenu struct {
-	items   []menuItem
-	stack   [][]menuItem
-	x, y    int
-	w, h    int
-	sel     int
-	confirm bool
-	header  string
+	items         []menuItem
+	stack         [][]menuItem
+	stackDividers [][]int // divider layout per open submenu level (deepest last)
+	dividers      []int   // item indices after which a horizontal separator is drawn
+	x, y          int
+	w, h          int
+	sel           int
+	confirm       bool
+	header        string
 }
 
 // menuMinWidth is the minimum content width (cells inside the borders) of the
@@ -49,38 +52,87 @@ type popupMenu struct {
 // header widens the box further whenever it is longer.
 const menuMinWidth = 16
 
+// menuCliGap is the minimum number of cells left between the action label and
+// the right-aligned docker CLI hint.
+const menuCliGap = 2
+
+// menuCliWidth returns the width of the widest docker CLI hint among the
+// items, or 0 when no item carries one (so popups without hints keep their
+// compact sizing).
+func menuCliWidth(items []menuItem) int {
+	n := 0
+	for _, it := range items {
+		if w := runewidth.StringWidth(it.cli); w > n {
+			n = w
+		}
+	}
+	return n
+}
+
 // containerMenuItems builds the first-stage actions for a container: a
 // state-dependent Stop/Pause or Start, a restart in all states, plus a Remove
 // item that expands into a submenu (Remove and Remove-with-data variants).
 // Hotkeys are only meaningful at this top level; once the user drills into the
 // submenu or the confirm stage they disappear.
-func (m Model) containerMenuItems(c docker.Container) []menuItem {
+func (m Model) containerMenuItems(c docker.Container) ([]menuItem, []int) {
+	name := containerDisplayName(c)
 	var items []menuItem
 	switch c.State {
 	case "running":
 		items = append(items,
-			menuItem{label: "Stop", key: "s", activate: m.toggleContainer},
-			menuItem{label: "Pause", key: "p", activate: m.pauseContainer},
+			menuItem{label: "Stop", key: "s", cli: "docker stop " + name, activate: m.toggleContainer},
+			menuItem{label: "Pause", key: "p", cli: "docker pause " + name, activate: m.pauseContainer},
 		)
 	case "paused":
 		items = append(items,
-			menuItem{label: "Resume", key: "r", activate: m.resumeContainer},
+			menuItem{label: "Resume", key: "r", cli: "docker unpause " + name, activate: m.resumeContainer},
 		)
 	default:
-		items = append(items, menuItem{label: "Start", key: "s", activate: m.toggleContainer})
+		items = append(items, menuItem{label: "Start", key: "s", cli: "docker start " + name, activate: m.toggleContainer})
 	}
 	items = append(items,
-		menuItem{label: "Restart", key: "r", activate: m.restartContainer},
+		menuItem{label: "Restart", key: "r", cli: "docker restart " + name, activate: m.restartContainer},
 	)
 	remove := menuItem{
 		label: "Remove",
 		key:   "d",
 		children: []menuItem{
-			{label: "Remove", confirm: true},
-			{label: "Remove with data", confirm: true, removeVolumes: true},
+			{label: "Remove", confirm: true, cli: "docker rm " + name},
+			{label: "Remove with data", confirm: true, removeVolumes: true, cli: "docker rm -v " + name},
 		},
 	}
-	return append(items, remove)
+	items = append(items, remove)
+	var dividers []int
+	if m.hasStoppedContainers() {
+		// Bulk action: acts on every stopped container, visually separated
+		// from the single-container operations above.
+		dividers = append(dividers, len(items))
+		items = append(items, menuItem{
+			label:         "Prune stopped",
+			key:           "g",
+			cli:           "docker container prune", // daemon-wide, no target
+			confirm:       true,
+			confirmHeader: "Prune all stopped containers?",
+			activate:      m.pruneContainers,
+		})
+	}
+	return items, dividers
+}
+
+// hasStoppedContainers reports whether the current list contains any container
+// the daemon would prune: exited, created, or dead (everything not running,
+// paused or restarting). Gate the "Prune stopped" action on this so it never
+// appears for a list that only holds active containers.
+func (m Model) hasStoppedContainers() bool {
+	for _, c := range m.containers {
+		switch c.State {
+		case "running", "paused", "restarting":
+			continue
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 // enterConfirmStage swaps the popup into the destructive-action stage: a
@@ -92,12 +144,14 @@ func (m *Model) enterConfirmStage(header string, yes func() tea.Cmd) {
 	m.menu.confirm = true
 	m.menu.sel = 0
 	m.menu.stack = nil
+	m.menu.stackDividers = nil
+	m.menu.dividers = nil
 	m.menu.header = header
 	m.menu.items = []menuItem{
 		{label: "Yes, remove", activate: yes},
 		{label: "No, cancel", activate: func() tea.Cmd { return nil }},
 	}
-	m.menu.w, m.menu.h = menuMeasure(m.menu.items, m.menu.header)
+	m.menu.w, m.menu.h = menuMeasure(m.menu.items, dividerCount(m.menu.dividers), m.menu.header)
 	// keep the enlarged confirm box centered like the first stage
 	m.menu.x = max((m.width-m.menu.w)/2, 0)
 	m.menu.y = max((m.height-m.menu.h)/2, tabBarHeight+1)
@@ -145,16 +199,17 @@ func containerDisplayName(c docker.Container) string {
 // The keyboard's x opens it; there is no mouse anchor anymore.
 func (m Model) buildContainerMenu() popupMenu {
 	c := m.containers[m.selectedIdx]
-	items := m.containerMenuItems(c)
+	items, dividers := m.containerMenuItems(c)
 	header := "Actions for container " + containerDisplayName(c)
-	w, h := menuMeasure(items, header)
+	w, h := menuMeasure(items, dividerCount(dividers), header)
 	return popupMenu{
-		items:  items,
-		header: header,
-		x:      max((m.width-w)/2, 0),
-		y:      max((m.height-h)/2, tabBarHeight+1),
-		w:      w,
-		h:      h,
+		items:    items,
+		dividers: dividers,
+		header:   header,
+		x:        max((m.width-w)/2, 0),
+		y:        max((m.height-h)/2, tabBarHeight+1),
+		w:        w,
+		h:        h,
 	}
 }
 
@@ -162,16 +217,17 @@ func (m Model) buildContainerMenu() popupMenu {
 // screen like the container menu. The keyboard x opens it on the Images tab.
 func (m Model) buildImageMenu() popupMenu {
 	img := m.images[m.selectedIdx]
-	items := m.imageMenuItems(img)
+	items, dividers := m.imageMenuItems(img)
 	header := "Actions for image " + imageDisplayName(img)
-	w, h := menuMeasure(items, header)
+	w, h := menuMeasure(items, dividerCount(dividers), header)
 	return popupMenu{
-		items:  items,
-		header: header,
-		x:      max((m.width-w)/2, 0),
-		y:      max((m.height-h)/2, tabBarHeight+1),
-		w:      w,
-		h:      h,
+		items:    items,
+		dividers: dividers,
+		header:   header,
+		x:        max((m.width-w)/2, 0),
+		y:        max((m.height-h)/2, tabBarHeight+1),
+		w:        w,
+		h:        h,
 	}
 }
 
@@ -179,8 +235,9 @@ func (m Model) buildImageMenu() popupMenu {
 // status: an image in use does not allow a plain removal (the daemon rejects
 // it), so it only offers "Force remove" (untag); unused and dangling images
 // offer "Remove". "Prune dangling" cleans every dangling image and is shown
-// only when at least one exists in the current list.
-func (m Model) imageMenuItems(img docker.Image) []menuItem {
+// only when at least one exists in the current list, separated by a divider
+// because it is a bulk action.
+func (m Model) imageMenuItems(img docker.Image) ([]menuItem, []int) {
 	st := classifyImage(img.Containers, len(img.RepoTags))
 	name := imageDisplayName(img)
 
@@ -197,25 +254,34 @@ func (m Model) imageMenuItems(img docker.Image) []menuItem {
 		}
 	}
 
+	removeCLI := "docker rmi " + name
+	if st.label == "IN-USE" {
+		removeCLI = "docker rmi -f " + name
+	}
+
 	items := []menuItem{
 		{
 			label:         removeLabel,
 			key:           "d",
+			cli:           removeCLI,
 			confirm:       true,
 			confirmHeader: removeLabel + " " + name + "?",
 			activate:      func() tea.Cmd { return m.imageRemoveCmd(img.ID, st.label == "IN-USE") },
 		},
 	}
+	var dividers []int
 	if hasDangling {
+		dividers = append(dividers, len(items))
 		items = append(items, menuItem{
 			label:         "Prune dangling",
 			key:           "p",
+			cli:           "docker image prune", // daemon-wide, no target
 			confirm:       true,
 			confirmHeader: "Prune all dangling images?",
 			activate:      m.pruneImagesCmd,
 		})
 	}
-	return items
+	return items, dividers
 }
 
 // imageDisplayName returns the first tag of an image, falling back to the
@@ -255,9 +321,26 @@ func (m Model) pruneImagesCmd() tea.Cmd {
 	}
 }
 
-func menuMeasure(items []menuItem, header string) (w, h int) {
+// pruneContainers prunes every stopped container the daemon still holds and
+// refreshes the list, mirroring pruneImagesCmd. The popup is already in the
+// confirm stage when this is bound, so it runs only after an explicit Yes.
+func (m Model) pruneContainers() tea.Cmd {
+	if m.docker == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		if err := m.docker.PruneContainers(); err != nil {
+			return errMsg{err}
+		}
+		time.Sleep(500 * time.Millisecond)
+		return m.refreshNow()()
+	}
+}
+
+func menuMeasure(items []menuItem, dividers int, header string) (w, h int) {
 	w = 2               // left + right border cells
 	const hotkeyPad = 2 // "<letter> " prefix before each hotkeyed label
+	cliW := menuCliWidth(items)
 	for _, it := range items {
 		l := runewidth.StringWidth(it.label)
 		if it.key != "" {
@@ -265,6 +348,9 @@ func menuMeasure(items []menuItem, header string) (w, h int) {
 		}
 		if it.children != nil {
 			l += 2 // trailing submenu arrow " ›"
+		}
+		if cliW > 0 {
+			l += menuCliGap + cliW + 1 // right-aligned docker CLI hint column + trailing gap
 		}
 		if l > w {
 			w = l
@@ -279,11 +365,28 @@ func menuMeasure(items []menuItem, header string) (w, h int) {
 	}
 	w = max(w, menuMinWidth)
 	w += 3 // inside padding: one leading indent cell per text row + filler
-	h = len(items) + 2
+	h = len(items) + 2 + dividers
 	if header != "" {
 		h += 2 // title row + horizontal separator below it
 	}
 	return w, h
+}
+
+// dividerCount reports how many horizontal separator rows the popup needs to
+// draw for the given divider positions.
+func dividerCount(dividers []int) int {
+	return len(dividers)
+}
+
+// menuHasDivider reports whether a horizontal separator row precedes the item
+// at index i.
+func menuHasDivider(dividers []int, i int) bool {
+	for _, d := range dividers {
+		if d == i {
+			return true
+		}
+	}
+	return false
 }
 
 // renderContainerMenu draws the popup box as one string per screen row, each
@@ -296,7 +399,12 @@ func (m Model) renderContainerMenu() []string {
 	if m.menu.header != "" {
 		// Reserve a leading and a trailing space in the title row so the text
 		// always sits clear of both borders (right gap of at least 1 cell).
-		rows = append(rows, MenuBoxStyle.Render("│"+padMenuRunes(" "+m.menu.header, max(iw-1, 0))+" "+"│"))
+		// The header text itself is drawn orange (MenuTitleStyle) while the
+		// surrounding filler keeps the box's surface background.
+		rows = append(rows,
+			MenuBoxStyle.Render("│ ")+
+				MenuTitleStyle.Render(centerMenuRunes(m.menu.header, max(iw-2, 0)))+
+				MenuBoxStyle.Render(" │"))
 		rows = append(rows, MenuBoxStyle.Render("│"+strings.Repeat("─", iw)+"│"))
 	}
 	for i, it := range m.menu.items {
@@ -306,21 +414,47 @@ func (m Model) renderContainerMenu() []string {
 			style = MenuActiveItemStyle
 			keyStyle = MenuActiveKeyStyle
 		}
+		// A horizontal rule separates the single-item actions from the bulk
+		// ones; it is drawn as its own non-interactive row before the item
+		// whose index is listed in dividers.
+		if menuHasDivider(m.menu.dividers, i) {
+			rows = append(rows, MenuBoxStyle.Render("│"+strings.Repeat("─", iw)+"│"))
+		}
 		label := it.label
 		if it.children != nil {
 			label += " ›"
 		}
 		// Item rows read "s Stop": a highlighted single hotkey letter (when
-		// any) then the right-padded label. Every segment — the surrounding
-		// spaces and the label — is its own Render on the row background, so
-		// no gap falls through to the default terminal background: only the
-		// letter itself carries the accent/hotkey foreground. Submenu and
-		// confirm levels carry no hotkey and render as plain rows.
+		// any) then the right-padded label, and when the item maps to a docker
+		// CLI command a muted hint right-aligned beyond the label. Every
+		// segment — the surrounding spaces, the label and the hint — is its own
+		// Render on the row background, so no gap falls through to the default
+		// terminal background: only the letter itself carries the
+		// accent/hotkey foreground. Submenu and confirm levels carry no hotkey
+		// and render as plain rows.
+		cliW := menuCliWidth(m.menu.items)
+		cliStyle := MenuCliStyle
+		if i == m.menu.sel {
+			cliStyle = MenuActiveCliStyle
+		}
 		var row string
-		if it.key != "" {
+		switch {
+		case it.key != "":
+			// labelAvail leaves room for " key " plus the reserved CLI column
+			// and a trailing cell between the hint and the right border.
+			labelAvail := max(iw-3-menuCliGap-cliW-1, 0)
 			row = style.Render(" ") + keyStyle.Render(it.key) + style.Render(" ") +
-				style.Render(padMenuRunes(label, max(iw-3, 0)))
-		} else {
+				style.Render(padMenuRunes(label, labelAvail)) +
+				style.Render(strings.Repeat(" ", menuCliGap)) +
+				cliStyle.Render(padMenuRunes(it.cli, cliW)) +
+				cliStyle.Render(" ")
+		case cliW > 0:
+			labelAvail := max(iw-1-menuCliGap-cliW-1, 0)
+			row = style.Render(" "+padMenuRunes(label, labelAvail)) +
+				style.Render(strings.Repeat(" ", menuCliGap)) +
+				cliStyle.Render(padMenuRunes(it.cli, cliW)) +
+				cliStyle.Render(" ")
+		default:
 			row = style.Render(" " + padMenuRunes(label, max(iw-1, 0)))
 		}
 		rows = append(rows, MenuBoxStyle.Render("│")+row+MenuBoxStyle.Render("│"))
@@ -341,6 +475,20 @@ func padMenuRunes(s string, n int) string {
 	return s + strings.Repeat(" ", n-runewidth.StringWidth(s))
 }
 
+// centerMenuRunes pads visible text on both sides so it sits centered within
+// exactly n display cells (extra cell goes to the right), trimming with an
+// ellipsis (fitRunes) when it is too wide.
+func centerMenuRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if w := runewidth.StringWidth(s); w > n {
+		return fitRunes(s, n)
+	}
+	pad := n - runewidth.StringWidth(s)
+	return strings.Repeat(" ", pad/2) + s + strings.Repeat(" ", pad-pad/2)
+}
+
 // menuActivate invokes the item at index i. A command means the popup closes
 // and the command is dispatched (Start/Stop, "Yes, remove"); "No, cancel"
 // returns nil with the popup still open and is closed here. A staging item
@@ -353,17 +501,24 @@ func (m *Model) menuActivate(i int) tea.Cmd {
 	it := m.menu.items[i]
 	// A parent with children is a submenu: push the current level onto the
 	// stack and show its children as the new level, reselecting the first.
+	// Divider layout is pushed alongside so backing out restores it.
 	if len(it.children) > 0 {
 		m.menu.stack = append(m.menu.stack, m.menu.items)
+		m.menu.stackDividers = append(m.menu.stackDividers, m.menu.dividers)
 		m.menu.items = it.children
+		m.menu.dividers = nil
 		m.menu.sel = 0
-		m.menu.w, m.menu.h = menuMeasure(m.menu.items, m.menu.header)
+		m.menu.w, m.menu.h = menuMeasure(m.menu.items, dividerCount(m.menu.dividers), m.menu.header)
 		m.menu.x = max((m.width-m.menu.w)/2, 0)
 		m.menu.y = max((m.height-m.menu.h)/2, tabBarHeight+1)
 		return nil
 	}
 	if it.confirm {
 		switch {
+		case it.confirmHeader != "":
+			// Items carrying their own header act on something other than the
+			// selected container (image remove, prune): just use them as-is.
+			m.enterConfirmStage(it.confirmHeader, it.activate)
 		case it.removeVolumes:
 			c := m.containers[m.selectedIdx]
 			m.enterConfirmStage("Remove "+containerDisplayName(c)+" and its volumes?", m.removeContainerVolumes)
@@ -397,8 +552,10 @@ func (m *Model) menuSubmenuBack() {
 	if n := len(m.menu.stack); n > 0 {
 		m.menu.items = m.menu.stack[n-1]
 		m.menu.stack = m.menu.stack[:n-1]
+		m.menu.dividers = m.menu.stackDividers[n-1]
+		m.menu.stackDividers = m.menu.stackDividers[:n-1]
 		m.menu.sel = 0
-		m.menu.w, m.menu.h = menuMeasure(m.menu.items, m.menu.header)
+		m.menu.w, m.menu.h = menuMeasure(m.menu.items, dividerCount(m.menu.dividers), m.menu.header)
 		m.menu.x = max((m.width-m.menu.w)/2, 0)
 		m.menu.y = max((m.height-m.menu.h)/2, tabBarHeight+1)
 		return
@@ -455,13 +612,13 @@ func (m Model) handleMenuMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 		sx, sy := msg.X-1, msg.Y-1 // mouse coords are 1-based screen cells
 		if sx >= m.menu.x && sx < m.menu.x+m.menu.w &&
 			sy >= m.menu.y && sy < m.menu.y+m.menu.h {
-			item := sy - m.menu.y - 1 // below the top border
+			row := sy - m.menu.y - 1 // below the top border
 			if m.menu.header != "" {
-				item -= 2 // title row + the horizontal separator below it
+				row -= 2 // title row + the horizontal separator below it
 			}
-			if item >= 0 && item < len(m.menu.items) {
-				m.menu.sel = item
-				return m, m.menuActivate(item)
+			if idx, ok := menuRowItem(len(m.menu.items), m.menu.dividers, row); ok {
+				m.menu.sel = idx
+				return m, m.menuActivate(idx)
 			}
 			return m, nil
 		}
@@ -471,6 +628,27 @@ func (m Model) handleMenuMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 	}
 	m.menuOpen = false
 	return m, nil
+}
+
+// menuRowItem maps a 0-based row offset inside the item block (below the
+// title and its separator) back to the item index, skipping the horizontal
+// divider rows that separate bulk actions. ok=false for divider rows and for
+// rows past the last item.
+func menuRowItem(items int, dividers []int, row int) (int, bool) {
+	r := 0
+	for i := 0; i < items; i++ {
+		if menuHasDivider(dividers, i) {
+			if r == row {
+				return 0, false
+			}
+			r++
+		}
+		if r == row {
+			return i, true
+		}
+		r++
+	}
+	return 0, false
 }
 
 // splicePopup overlays the popup box onto the fully rendered frame, one menu

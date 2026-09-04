@@ -59,6 +59,26 @@ var MenuActiveKeyStyle = lipgloss.NewStyle().
 	Foreground(t.Foreground).
 	Bold(true)
 
+// MenuCliStyle paints the (right-aligned) docker CLI hint beside an action:
+// muted so it stays secondary next to the row label, on the row background.
+var MenuCliStyle = lipgloss.NewStyle().
+	Background(t.Surface).
+	Foreground(t.Muted)
+
+// MenuActiveCliStyle is the docker CLI hint on the selected (inverted-green)
+// row. The muted gray used on surface rows is too dim against the green, so
+// the hint switches to the bright foreground (still non-bold, so it does not
+// compete with the bold label).
+var MenuActiveCliStyle = lipgloss.NewStyle().
+	Background(lipgloss.Color("#2ea043")).
+	Foreground(t.Foreground)
+
+// MenuTitleStyle paints the popup header: an orange title that stands apart
+// from the green accent of the selected row and from the muted body text.
+var MenuTitleStyle = lipgloss.NewStyle().
+	Background(t.Surface).
+	Foreground(lipgloss.Color("#f0883e"))
+
 var (
 	BaseStyle = lipgloss.NewStyle().
 			Background(t.Background).

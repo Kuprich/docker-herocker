@@ -2111,29 +2111,83 @@ func TestRenderContainerMenuShape(tt *testing.T) {
 			tt.Errorf("menu row width = %d, want %d: %q", lipgloss.Width(r), m.menu.w, stripANSI(r))
 		}
 	}
-	wantTitle := "Actions for container " + containerDisplayName(m.containers[0])
-	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[1]), "│")); got != wantTitle {
-		tt.Errorf("title = %q, want %q", got, wantTitle)
+	wantedTitle := "Actions for container " + containerDisplayName(m.containers[0])
+	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[1]), "│")); got != wantedTitle {
+		tt.Errorf("title = %q, want %q", got, wantedTitle)
+	}
+	// the popup title is centered within the title row (borders are the cell
+	// inside each border plus the equal centering pad; a 1-cell slack hangs
+	// on the right when the interior width is odd)
+	if text := strings.Trim(stripANSI(rows[1]), "│"); text != "" {
+		idx := strings.Index(text, wantedTitle)
+		if idx < 0 {
+			tt.Errorf("title %q not found in row %q", wantedTitle, text)
+		} else if gap := (len(text) - idx - len(wantedTitle)) - idx; gap > 1 || gap < 0 {
+			tt.Errorf("title not centered: left=%d right=%d in %q", idx, len(text)-idx-len(wantedTitle), text)
+		}
 	}
 	// the title is separated from the actions by a full-width horizontal rule
 	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[2]), "│")); strings.ReplaceAll(got, "─", "") != "" {
 		tt.Errorf("separator row = %q, want a full-width ─ rule", got)
 	}
-	// running container -> 4 items: Stop, Pause, Restart, Remove(submenu)
-	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[3]), "│")); got != "s Stop" {
-		tt.Errorf("first item = %q, want a s Stop row for a running container", got)
+	// running container -> 5 items: Stop, Pause, Restart, Remove(submenu),
+	// plus the bulk Prune stopped separated by a rule
+	if got := strings.Fields(strings.Trim(strings.Trim(stripANSI(rows[3]), "│"), " "))[:2]; len(got) != 2 || got[0] != "s" || got[1] != "Stop" {
+		tt.Errorf("first item = %q, want a s Stop row for a running container", strings.TrimSpace(strings.Trim(stripANSI(rows[3]), "│")))
 	}
-	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[4]), "│")); got != "p Pause" {
-		tt.Errorf("second item = %q, want a p Pause row for a running container", got)
+	if got := strings.Fields(strings.Trim(strings.Trim(stripANSI(rows[4]), "│"), " "))[:2]; len(got) != 2 || got[0] != "p" || got[1] != "Pause" {
+		tt.Errorf("second item = %q, want a p Pause row for a running container", strings.TrimSpace(strings.Trim(stripANSI(rows[4]), "│")))
 	}
-	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[5]), "│")); got != "r Restart" {
-		tt.Errorf("third item = %q, want a r Restart row", got)
+	if got := strings.Fields(strings.Trim(strings.Trim(stripANSI(rows[5]), "│"), " "))[:2]; len(got) != 2 || got[0] != "r" || got[1] != "Restart" {
+		tt.Errorf("third item = %q, want a r Restart row", strings.TrimSpace(strings.Trim(stripANSI(rows[5]), "│")))
 	}
-	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[6]), "│")); got != "d Remove ›" {
+	if got := strings.Trim(strings.Trim(stripANSI(rows[6]), "│"), " "); !strings.HasPrefix(got, "d Remove ›") {
 		tt.Errorf("fourth item = %q, want a d Remove submenu row", got)
 	}
-	if len(rows) != 8 {
-		tt.Errorf("menu rows = %d, want 8 (4 items + header + borders)", len(rows))
+	// a horizontal rule separates the single-container actions from the bulk
+	// "Prune stopped" action below (a stopped container exists in the list)
+	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[7]), "│")); strings.ReplaceAll(got, "─", "") != "" {
+		tt.Errorf("divider row = %q, want a full-width ─ rule", got)
+	}
+	if got := strings.Trim(strings.Trim(stripANSI(rows[8]), "│"), " "); !strings.HasPrefix(got, "g Prune stopped") {
+		tt.Errorf("fifth item = %q, want a g Prune stopped row", strings.TrimSpace(strings.Trim(stripANSI(rows[8]), "│")))
+	}
+	if len(rows) != 10 {
+		tt.Errorf("menu rows = %d, want 10 (5 items + divider + header + borders)", len(rows))
+	}
+
+	// the docker CLI hint column is right-aligned: every hint ends at the same
+	// display column, flush against the right border of the menu. The "Remove ›"
+	// submenu row carries no hint, so it is skipped.
+	cliEnd := -1
+	for _, r := range rows[3:9] {
+		text := strings.Trim(stripANSI(r), "│")
+		idx := strings.LastIndex(text, "docker")
+		if idx < 0 {
+			continue
+		}
+		if end := lipgloss.Width(stripANSI(r)) - (len(text) - idx); cliEnd == -1 {
+			cliEnd = end
+		} else if end != cliEnd {
+			tt.Errorf("docker hints not right-aligned: end %d vs %d in %q", end, cliEnd, text)
+		}
+	}
+	// the hint is muted (#8b949e) on the unselected rows, but is NOT muted on
+	// the selected row: gray-on-green is hard to read, so the selected hint is
+	// bright white like the hotkey
+	if !strings.Contains(rows[4], "38;2;139;147;158;48;2;22;27;34mdocker pause ") {
+		tt.Error("unselected-row docker hint must be muted (139;147;158)")
+	}
+	if strings.Contains(rows[3], "38;2;139;147;158;48;2;46;160;67mdocker stop ") {
+		tt.Error("selected-row docker hint must not be muted (gray on green is unreadable)")
+	}
+	if !strings.Contains(rows[3], "38;2;230;237;243;48;2;46;160;67mdocker stop ") {
+		tt.Error("selected-row docker hint must be bright white (230;237;243)")
+	}
+
+	// the popup title is orange (#f0883e)
+	if !strings.Contains(rows[1], "38;2;240;136;62") {
+		tt.Errorf("menu title should be orange (240;136;62):\n%s", rows[1])
 	}
 
 	// the hotkey on the selected row is white (readable on the green
@@ -2256,8 +2310,16 @@ func TestMenuNavigationAndEsc(tt *testing.T) {
 		tt.Errorf("down = %d, want 3", next.menu.sel)
 	}
 	next = testMouseUpdate(next, down)
+	if next.menu.sel != 4 {
+		tt.Errorf("down = %d, want 4", next.menu.sel)
+	}
+	next = testMouseUpdate(next, down)
+	if next.menu.sel != 4 {
+		tt.Errorf("down past the last item = %d, want 4 (clamped)", next.menu.sel)
+	}
+	next = testMouseUpdate(next, up)
 	if next.menu.sel != 3 {
-		tt.Errorf("down past the last item = %d, want 3 (clamped)", next.menu.sel)
+		tt.Errorf("up = %d, want 3", next.menu.sel)
 	}
 	next = testMouseUpdate(next, up)
 	if next.menu.sel != 2 {
@@ -2349,8 +2411,8 @@ func TestMenuClickOutsideCloses(tt *testing.T) {
 	if !next.menuOpen {
 		tt.Fatal("Esc in the submenu should return to the root, not close")
 	}
-	if len(next.menu.items) != 4 {
-		tt.Fatalf("back to root should restore %d items, got %d", 4, len(next.menu.items))
+	if len(next.menu.items) != 5 {
+		tt.Fatalf("back to root should restore %d items, got %d", 5, len(next.menu.items))
 	}
 
 	// left-click clearly outside the box (right and below) closes the popup;
@@ -2586,7 +2648,7 @@ func TestImageMenuVariesByStatus(tt *testing.T) {
 	// IN-USE images cannot be removed plainly: only "Force remove" is offered.
 	m.images = []docker.Image{{ID: "sha256:" + strings.Repeat("a", 64), RepoTags: []string{"app:latest"}, Containers: 1}}
 	m.fitViewports()
-	items := m.imageMenuItems(m.images[0])
+	items, _ := m.imageMenuItems(m.images[0])
 	if got := items[0].label; got != "Force remove" {
 		tt.Errorf("in-use item = %q, want Force remove", got)
 	}
@@ -2594,7 +2656,7 @@ func TestImageMenuVariesByStatus(tt *testing.T) {
 	// UNUSED images offer a plain Remove.
 	m.images = []docker.Image{{ID: "sha256:" + strings.Repeat("a", 64), RepoTags: []string{"app:latest"}, Containers: 0}}
 	m.fitViewports()
-	items = m.imageMenuItems(m.images[0])
+	items, _ = m.imageMenuItems(m.images[0])
 	if got := items[0].label; got != "Remove" {
 		tt.Errorf("unused item = %q, want Remove", got)
 	}
@@ -2613,7 +2675,7 @@ func TestImageMenuPruneOnlyWithDangling(tt *testing.T) {
 		{ID: "sha256:" + strings.Repeat("b", 64), RepoTags: []string{"busybox:latest"}},
 	}
 	m.fitViewports()
-	labelled = m.imageMenuItems(m.images[0])
+	labelled, _ = m.imageMenuItems(m.images[0])
 	if len(labelled) != 1 {
 		tt.Fatalf("menu without dangling = %d items, want 1", len(labelled))
 	}
@@ -2621,7 +2683,7 @@ func TestImageMenuPruneOnlyWithDangling(tt *testing.T) {
 	// one dangling image unlocks the prune action
 	m.images = append(m.images, docker.Image{ID: "sha256:" + strings.Repeat("c", 64), RepoTags: nil})
 	m.fitViewports()
-	items := m.imageMenuItems(m.images[0])
+	items, dividers := m.imageMenuItems(m.images[0])
 	if len(items) != 2 {
 		tt.Fatalf("menu with dangling = %d items, want 2", len(items))
 	}
@@ -2630,6 +2692,10 @@ func TestImageMenuPruneOnlyWithDangling(tt *testing.T) {
 	}
 	if !items[1].confirm {
 		tt.Error("Prune dangling must stage a confirm")
+	}
+	// the bulk action is visually separated from the single-image Remove
+	if len(dividers) != 1 || dividers[0] != 1 {
+		tt.Errorf("dividers = %v, want [1] (before the prune item)", dividers)
 	}
 }
 
@@ -2724,6 +2790,92 @@ func TestMenuPauseResume(tt *testing.T) {
 		if it.label == "Pause" {
 			tt.Error("exited container must not offer Pause")
 		}
+	}
+}
+
+func TestMenuPruneStoppedGating(tt *testing.T) {
+	// a list that only holds running containers never offers the bulk prune
+	allRunning := []docker.Container{{ID: "aaaaaaaaaaaa", Names: []string{"/web"}, Image: "img:latest", State: "running"}}
+	m := detailTestModel()
+	m.containers = allRunning
+	m.fitViewports()
+	items, dividers := m.containerMenuItems(allRunning[0])
+	for _, it := range items {
+		if it.label == "Prune stopped" {
+			tt.Error("running-only list must not offer Prune stopped")
+		}
+	}
+	if len(dividers) != 0 {
+		tt.Errorf("running-only list dividers = %v, want none", dividers)
+	}
+	if m.hasStoppedContainers() {
+		tt.Error("hasStoppedContainers should be false with only running containers")
+	}
+
+	// any stopped (exited) container in the list adds the separated prune item
+	m.containers = append(m.containers, docker.Container{ID: "bbbbbbbbbbbb", Names: []string{"/worker"}, Image: "img:latest", State: "exited"})
+	m.fitViewports()
+	if !m.hasStoppedContainers() {
+		tt.Error("hasStoppedContainers should be true once a stopped container exists")
+	}
+	items, dividers = m.containerMenuItems(m.containers[0])
+	last := items[len(items)-1]
+	if last.label != "Prune stopped" {
+		tt.Errorf("last item = %q, want Prune stopped", last.label)
+	}
+	if !last.confirm {
+		tt.Error("Prune stopped must stage a confirm")
+	}
+	if len(dividers) != 1 || dividers[0] != len(items)-1 {
+		tt.Errorf("dividers = %v, want [%d] (before the prune item)", dividers, len(items)-1)
+	}
+
+	// running/paused/restarting containers are not prunable
+	m.containers = []docker.Container{
+		{ID: "aaaaaaaaaaaa", Names: []string{"/p"}, Image: "img:latest", State: "paused"},
+		{ID: "bbbbbbbbbbbb", Names: []string{"/r"}, Image: "img:latest", State: "restarting"},
+		{ID: "cccccccccccc", Names: []string{"/c"}, Image: "img:latest", State: "created"},
+	}
+	m.fitViewports()
+	_, dividers = m.containerMenuItems(m.containers[0])
+	if len(dividers) != 1 {
+		tt.Errorf("only 'created' is stopped, dividers = %v, want one", dividers)
+	}
+}
+
+func TestMenuPruneStoppedConfirmFlow(tt *testing.T) {
+	m := detailTestModel()
+	m.containers = makeTestContainers(3) // includes an exited container
+	m.fitViewports()
+	m.selectedIdx = 0
+	m.menu = m.buildContainerMenu()
+	m.menuOpen = true
+
+	// the prune item is gated behind a divider at the bottom
+	pruneIdx := len(m.menu.items) - 1
+	if got := m.menu.items[pruneIdx].label; got != "Prune stopped" {
+		tt.Fatalf("last item = %q, want Prune stopped", got)
+	}
+
+	// Enter on Prune stopped stages the daemon-wide confirm header
+	next := testMouseUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
+	if !next.menu.confirm {
+		tt.Fatal("pressing g on Prune stopped should stage the confirm")
+	}
+	if want := "Prune all stopped containers?"; next.menu.header != want {
+		tt.Errorf("confirm header = %q, want %q", next.menu.header, want)
+	}
+	if got := next.menu.items[0].label; got != "Yes, remove" {
+		tt.Errorf("confirm first item = %q, want Yes, remove", got)
+	}
+	// confirm stage clears the divider layout
+	if len(next.menu.dividers) != 0 {
+		tt.Errorf("confirm stage must clear dividers, got %v", next.menu.dividers)
+	}
+	// Esc cancels back to nothing (confirm stage has no stack)
+	next = testMouseUpdate(next, tea.KeyMsg{Type: tea.KeyEsc})
+	if next.menuOpen {
+		tt.Fatal("Esc on the confirm stage should close the popup")
 	}
 }
 

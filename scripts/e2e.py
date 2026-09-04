@@ -461,8 +461,10 @@ def x_key_opens_context_menu(s):
     assert "Actions for container" in tail, "x key menu lacks its title"
     assert "Remove" in tail, "x key menu lacks the Remove submenu item"
     # the title row carries the box border to its left, so it must not start at
-    # column 0: the popup is centered, not left-anchored
-    assert "│ Actions for container" in tail, "popup title is not inside a centered box"
+    # column 0: the popup is centered, not left-anchored. Color codes may sit
+    # between the border and the orange title text (segmented styling).
+    assert re.search(r"│[^\n]*?Actions for container", tail), \
+        "popup title is not inside a centered box"
 
     # Esc closes; j moves to the next row, and x reopens there
     s.send(b"\x1b"); time.sleep(0.05)

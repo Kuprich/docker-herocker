@@ -257,6 +257,15 @@ func (c *Client) PruneImages() error {
 	return err
 }
 
+// PruneContainers removes every stopped (exited/created) container, the
+// daemon's notion of "unused": a stopped container holds its writable layer's
+// data, so this is destructive and irreversible. Operating containers are
+// never pruned by the daemon.
+func (c *Client) PruneContainers() error {
+	_, err := c.cli.ContainerPrune(context.Background(), mclient.ContainerPruneOptions{})
+	return err
+}
+
 func (c *Client) StartContainer(id string) error {
 	_, err := c.cli.ContainerStart(context.Background(), id, mclient.ContainerStartOptions{})
 	return err
