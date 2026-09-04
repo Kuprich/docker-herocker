@@ -18,6 +18,9 @@ type keyMap struct {
 	Two       key.Binding
 	Three     key.Binding
 	Four      key.Binding
+	PrevTab   key.Binding
+	NextTab   key.Binding
+	SubTab    key.Binding
 	Select    key.Binding
 }
 
@@ -81,6 +84,15 @@ var keys = keyMap{
 	Four: key.NewBinding(
 		key.WithKeys("4"),
 		key.WithHelp("4", "networks"),
+	),
+	PrevTab: key.NewBinding(
+		key.WithKeys("h"),
+	),
+	NextTab: key.NewBinding(
+		key.WithKeys("l"),
+	),
+	SubTab: key.NewBinding(
+		key.WithKeys("tab"),
 	),
 	Select: key.NewBinding(
 		key.WithKeys(""),

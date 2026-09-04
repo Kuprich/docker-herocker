@@ -479,6 +479,52 @@ func TestSwitchTabResetsSelection(tt *testing.T) {
 	}
 }
 
+func TestHLSwitchTabsWithWrap(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.containers = makeTestContainers(3)
+	m.selectedIdx = 2
+	m.activeTab = tabContainers
+	m.fitViewports()
+
+	hl := func(m Model, r rune) Model {
+		next, _ := testUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		return next
+	}
+
+	// l advances containers -> images -> volumes -> networks -> (wrap) containers
+	cur := hl(m, 'l')
+	if cur.activeTab != tabImages {
+		tt.Fatalf("l from containers = %d, want images", cur.activeTab)
+	}
+	cur = hl(cur, 'l')
+	if cur.activeTab != tabVolumes {
+		tt.Fatalf("l from images = %d, want volumes", cur.activeTab)
+	}
+	cur = hl(cur, 'l')
+	if cur.activeTab != tabNetworks {
+		tt.Fatalf("l from volumes = %d, want networks", cur.activeTab)
+	}
+	cur = hl(cur, 'l')
+	if cur.activeTab != tabContainers {
+		tt.Fatalf("l from networks = %d, want wrap to containers", cur.activeTab)
+	}
+
+	// h goes backwards and wraps at the other edge
+	cur = hl(cur, 'h')
+	if cur.activeTab != tabNetworks {
+		tt.Fatalf("h from containers = %d, want wrap to networks", cur.activeTab)
+	}
+
+	// the selection always resets to the top of the new tab
+	m2 := hl(m, 'l')
+	if m2.selectedIdx != 0 {
+		tt.Errorf("selectedIdx after l switch = %d, want 0", m2.selectedIdx)
+	}
+}
+
 func TestWheelAfterTabSwitchStartsFromTop(tt *testing.T) {
 	m := New(nil)
 	m.width = 120
@@ -1597,6 +1643,21 @@ func TestLogSelectionLeavingTabClearsKey(tt *testing.T) {
 	}
 	if next.logSel.active {
 		tt.Error("leaving the Logs tab should clear the selection")
+	}
+}
+
+func TestTabSwitchesInfoLogs(tt *testing.T) {
+	m := logTestModel()
+	m.activeSubTab = subTabInfo
+
+	tabMsg := tea.KeyMsg{Type: tea.KeyTab}
+	next := testMouseUpdate(m, tabMsg)
+	if next.activeSubTab != subTabLogs {
+		tt.Fatalf("tab from Info = %d, want Logs", next.activeSubTab)
+	}
+	next = testMouseUpdate(next, tabMsg)
+	if next.activeSubTab != subTabInfo {
+		tt.Fatalf("tab from Logs = %d, want Info", next.activeSubTab)
 	}
 }
 

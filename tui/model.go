@@ -309,6 +309,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.detailDragSel = false
 				return m, m.loadContainerLogs()
 			}
+		case key.Matches(msg, keys.SubTab):
+			if m.activeTab == tabContainers {
+				if m.activeSubTab == subTabInfo {
+					m.activeSubTab = subTabLogs
+					m.detailSel = textSel{}
+					m.detailDragSel = false
+					return m, m.loadContainerLogs()
+				}
+				m.activeSubTab = subTabInfo
+				m.logSel = textSel{}
+				m.dragSel = false
+				m.detailSel = textSel{}
+				m.detailDragSel = false
+				return m, m.loadContainerDetails()
+			}
 		case key.Matches(msg, keys.Up):
 			oldIdx := m.selectedIdx
 			m.moveUp()
@@ -380,6 +395,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Four):
 			m.switchTab(tabNetworks)
 			return m, m.refreshNow()
+		case key.Matches(msg, keys.PrevTab):
+			m.switchTabRelative(-1)
+			return m, tea.Batch(m.refreshNow(), m.loadContainerDetails())
+		case key.Matches(msg, keys.NextTab):
+			m.switchTabRelative(+1)
+			return m, tea.Batch(m.refreshNow(), m.loadContainerDetails())
 		}
 
 	case refreshTickMsg:
@@ -2002,7 +2023,7 @@ func (m Model) renderContainerList(w, vw, h int) (string, string) {
 	if len(m.containers) == 0 {
 		return "", MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No containers found"))
 	}
-	hdr := fmt.Sprintf("    %-29s %-11s  %7s    %-13s %-20s  %-22s", "NAME", "STATE", "CPU %", "MEM", "IMAGE", "PORTS")
+	hdr := fmt.Sprintf("    %-29s %-11s  %7s    %-13s  %-20s  %-22s", "NAME", "STATE", "CPU %", "MEM", "IMAGE", "PORTS")
 	if pad := w - len([]rune(hdr)); pad > 0 {
 		hdr += strings.Repeat(" ", pad)
 	}
@@ -2529,6 +2550,13 @@ func (m *Model) switchTab(t tab) {
 	m.detailSel = textSel{}
 	m.detailDragSel = false
 	m.fitViewports()
+}
+
+// switchTabRelative moves to the neighbouring main tab (h/l), wrapping around
+// the tabNetworks<->tabContainers edges.
+func (m *Model) switchTabRelative(delta int) {
+	n := 4
+	m.switchTab(tab((int(m.activeTab)+delta+n)%n))
 }
 
 func (m *Model) moveUp() {
