@@ -454,10 +454,12 @@ def x_key_opens_context_menu(s):
     s.send(b"x"); time.sleep(0.05)
     s.drain(0.8)
     tail = s.allbuf[mark:].decode("utf-8", "replace")
-    assert re.search(r"\x1b\[[0-9;]*48;2;46;160;67[0-9;]*m +(Start|Stop)", tail), \
+    # the active row is on green background; it now carries a hotkey letter
+    # (lowercase, no brackets) before the action label
+    assert re.search(r"\x1b\[[0-9;]*48;2;46;160;67[0-9;]*m[\s\S]{0,80}?(Start|Stop)", tail), \
         "x key did not render an active Start/Stop menu row"
     assert "Actions for container" in tail, "x key menu lacks its title"
-    assert "Remove with data" in tail, "x key menu lacks the Remove with data item"
+    assert "Remove" in tail, "x key menu lacks the Remove submenu item"
     # the title row carries the box border to its left, so it must not start at
     # column 0: the popup is centered, not left-anchored
     assert "│ Actions for container" in tail, "popup title is not inside a centered box"
@@ -471,10 +473,10 @@ def x_key_opens_context_menu(s):
     s.send(b"x"); time.sleep(0.05)
     s.drain(0.8)
     tail = s.allbuf[mark:].decode("utf-8", "replace")
-    assert re.search(r"\x1b\[[0-9;]*48;2;46;160;67[0-9;]*m +(Start|Stop)", tail), \
+    assert re.search(r"\x1b\[[0-9;]*48;2;46;160;67[0-9;]*m[\s\S]{0,80}?(Start|Stop)", tail), \
         "x after j did not reopen the popup"
     assert "Actions for container" in tail, "x after j menu lacks its title"
-    assert "Remove with data" in tail, "x after j menu lacks the Remove with data item"
+    assert "Remove" in tail, "x after j menu lacks the Remove submenu item"
 
     # Esc closes; a forced repaint must carry no menu labels
     s.send(b"\x1b"); time.sleep(0.05)

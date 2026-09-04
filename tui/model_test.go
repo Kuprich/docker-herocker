@@ -68,6 +68,32 @@ func TestStateColorsAreDistinct(tt *testing.T) {
 	}
 }
 
+func TestClassifyImage(tt *testing.T) {
+	cases := []struct {
+		name       string
+		containers int64
+		ntags      int
+		wantLabel  string
+		wantDot    string
+	}{
+		{"in-use by a container", 2, 1, "IN-USE", "●"},
+		{"tagged but unused", 0, 1, "UNUSED", "●"},
+		{"unknown container count treated as unused", -1, 1, "UNUSED", "●"},
+		{"dangling (no tags)", 0, 0, "DANGLING", "○"},
+		{"in-use even when tagless", 1, 0, "IN-USE", "●"},
+	}
+	for _, c := range cases {
+		st := classifyImage(c.containers, c.ntags)
+		if st.label != c.wantLabel {
+			tt.Errorf("%s: label = %q, want %q", c.name, st.label, c.wantLabel)
+		}
+		if st.dot != c.wantDot {
+			tt.Errorf("%s: dot = %q, want %q", c.name, st.dot, c.wantDot)
+		}
+	}
+}
+
+
 func TestRenderPortsCellFillsWidthWithBackground(tt *testing.T) {
 	// lipgloss downgrades to the Ascii profile when stdout is not a TTY;
 	// force TrueColor so the emitted SGR sequences assert the real palette.
@@ -481,6 +507,105 @@ func TestImageMsgKeepsSelectionOnActiveImagesTab(tt *testing.T) {
 	next := testMouseUpdate(m, imageMsg(makeTestImages(14)))
 	if next.selectedIdx != 7 {
 		tt.Errorf("refresh reset selection to %d, want 7", next.selectedIdx)
+	}
+}
+
+func TestImageListRendersDotsAndStatusLabels(tt *testing.T) {
+	m := New(nil)
+	m.width = 140
+	m.height = 30
+	m.ready = true
+	m.loading = false
+	m.images = []docker.Image{
+		{ID: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", RepoTags: []string{"app:latest"}, Created: 1700000000, Size: 1 << 30, Containers: 2},
+		{ID: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", RepoTags: []string{"busybox:latest"}, Created: 1700000000, Size: 1 << 20},
+		{ID: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", RepoTags: nil, Created: 1700000000, Size: 1 << 25},
+	}
+	m.fitMainViewport()
+
+	w, vw, h := innerW(m.width), innerW(m.width)-1, m.height-tabBarHeight-helpBarHeight
+	hdr, rows := m.renderImageList(w, vw, h)
+	_ = hdr
+
+	lines := strings.Split(stripANSI(rows), "\n")
+	if len(lines) != len(m.images) {
+		tt.Fatalf("got %d rows, want %d", len(lines), len(m.images))
+	}
+
+	assertRow := func(i int, wantDot, wantLabel, wantSize, wantIDHex, wantUnit, wantDate string) {
+		runes := []rune(lines[i])
+		if len(runes) < 2 {
+			tt.Fatalf("row %d too short: %q", i, lines[i])
+		}
+		if string(runes[1]) != wantDot {
+			tt.Errorf("row %d dot = %q, want %q", i, string(runes[1]), wantDot)
+		}
+		// STATUS is the second column, flush-left at a fixed offset.
+		const labelStart = 47 // [0]=indent [1]=dot [2:47] repo [47:..] status
+		got := string(runes[labelStart : labelStart+len([]rune(wantLabel))])
+		if got != wantLabel {
+			tt.Errorf("row %d label at col %d = %q, want %q (line %q)", i, labelStart, got, wantLabel, lines[i])
+		}
+		// CREATED dates are flush-left in their column (aligned with the
+		// header): the date begins at the left edge of the created column.
+		const createdStart = 59 // createdCol(59)
+		if got := string(runes[createdStart : createdStart+len([]rune(wantDate))]); got != wantDate {
+			tt.Errorf("row %d created at col %d = %q, want %q (line %q)", i, createdStart, got, wantDate, lines[i])
+		}
+		// SIZE carries a space between value and unit.
+		if !strings.Contains(lines[i], wantSize) {
+			tt.Errorf("row %d missing size %q in %q", i, wantSize, lines[i])
+		}
+		// Units are right-aligned in the SIZE column, so they stack in one line:
+		// the last rune of the SIZE column is the final unit character.
+		const sizeEnd = 81 // sizeCol(72) + sizeW(9)
+		if got := string(runes[sizeEnd-len([]rune(wantUnit)) : sizeEnd]); got != wantUnit {
+			tt.Errorf("row %d unit at right edge = %q, want %q (line %q)", i, got, wantUnit, lines[i])
+		}
+		// IMAGE ID is the last column and keeps the digest prefix.
+		if !strings.Contains(lines[i], "sha256:"+wantIDHex) {
+			tt.Errorf("row %d missing sha256:%s id in %q", i, wantIDHex, lines[i])
+		}
+	}
+
+	assertRow(0, "●", "IN-USE", "1.0 GB", "aaaa", "GB", "2023-11-15")
+	assertRow(1, "●", "UNUSED", "1.0 MB", "bbbb", "MB", "2023-11-15")
+	assertRow(2, "○", "DANGLING", "32.0 MB", "cccc", "MB", "2023-11-15")
+}
+
+func TestFormatImageSizeSeparatesValueAndUnit(tt *testing.T) {
+	cases := map[int64]string{
+		(1 << 40) + (1 << 39): "1.5 TB",
+		(1 << 30) + (1 << 30)/2: "1.5 GB",
+		(1 << 20) + (1 << 20)/2: "1.5 MB",
+		(1 << 10) + (1 << 10)/2: "1.5 KB",
+		12:                      "12 B",
+		0:                       "0 B",
+	}
+	for in, want := range cases {
+		if got := formatImageSize(in); got != want {
+			tt.Errorf("formatImageSize(%d) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSizeUnitColor(tt *testing.T) {
+	for _, unit := range []string{"B", "KB", "MB", "GB", "TB", "PB"} {
+		if got := sizeUnitColor(unit); got != t.Muted {
+			tt.Errorf("sizeUnitColor(%q) = %v, want muted %v", unit, got, t.Muted)
+		}
+	}
+}
+
+func TestFormatImageIDKeepsPrefixAndTruncatesHex(tt *testing.T) {
+	id := "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	want := "sha256:0123456789ab" // 7-char prefix + 12 hex
+	if got := formatImageID(id); got != want {
+		tt.Errorf("formatImageID = %q, want %q", got, want)
+	}
+	// a bare id (no digest scheme) is truncated to the column width
+	if got := formatImageID("0123456789abcdef"); got != "0123456789abcdef" {
+		tt.Errorf("formatImageID(bare) = %q", got)
 	}
 }
 

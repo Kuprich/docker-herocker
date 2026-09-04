@@ -2113,13 +2113,40 @@ func (m Model) renderImageList(w, vw, h int) (string, string) {
 		return "", MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No images found"))
 	}
 
-	hdr := fmt.Sprintf("     %-42s %-16s  %-20s  %-14s", "REPOSITORY:TAG", "IMAGE ID", "CREATED", "SIZE")
+	hdr := fmt.Sprintf("    %-42s %-9s   %-12s  %-9s    %-19s", "REPOSITORY:TAG", "STATUS", "CREATED", "SIZE", "IMAGE ID")
 	padding := w - len([]rune(hdr))
 	if padding > 0 {
 		hdr += strings.Repeat(" ", padding)
 	}
 	header := lipgloss.NewStyle().Background(t.Background).Foreground(t.Accent).Bold(true).Render(hdr)
 	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
+
+	// Fixed rune offsets of the row produced by the format string
+	// (" %s  %-42s %-9s   %-12s %9s     %-19s"): the dot column is [0..4),
+	// then REPOSITORY:TAG / STATUS / CREATED / SIZE / IMAGE ID, all flush-left,
+	// with SIZE right-aligned so units stack in one vertical line.
+	const (
+		repoEnd     = 46  // first rune after REPOSITORY:TAG
+		statusCol   = 47  // status label begins here
+		createdCol  = 59  // CREATED begins here
+		sizeCol     = 72  // SIZE begins here
+		sizeW       = 9   // SIZE column width
+		idCol       = 86  // IMAGE ID begins here
+		idPrefixLen = 7   // len("sha256:")
+		idHexLen    = 12  // hex payload width
+	)
+	seg := func(runes []rune, from, to int) string {
+		if from > len(runes) {
+			from = len(runes)
+		}
+		if to > len(runes) {
+			to = len(runes)
+		}
+		if from > to {
+			from = to
+		}
+		return string(runes[from:to])
+	}
 
 	var rows []string
 	for i := range m.images {
@@ -2130,26 +2157,25 @@ func (m Model) renderImageList(w, vw, h int) (string, string) {
 		}
 		repoTag = Truncate(repoTag, 42)
 
-		shortID := Truncate(img.ID, 16)
-		if len(shortID) > 12 {
-			shortID = shortID[:12]
+		created := Truncate(formatCreated(img.Created), 20)
+		size := Truncate(formatImageSize(img.Size), 14)
+		id := formatImageID(img.ID)
+
+		// Split "1.5 GB" into the numeric part and the unit so the SIZE value
+		// can be colored independently of its magnitude marker.
+		sizeNum, sizeUnit := size, ""
+		if k := strings.IndexRune(size, ' '); k >= 0 {
+			sizeNum, sizeUnit = size[:k], size[k+1:]
 		}
 
-		created := formatCreated(img.Created)
-		created = Truncate(created, 20)
+		st := classifyImage(img.Containers, len(img.RepoTags))
 
-		size := formatImageSize(img.Size)
-		size = Truncate(size, 14)
-
-		line := fmt.Sprintf(" %s  %-42s %-16s  %-20s  %-14s", "◎", repoTag, shortID, created, size)
+		line := fmt.Sprintf(" %s  %-42s %-9s   %-12s %9s     %-19s", st.dot, repoTag, st.label, created, size, id)
 		runes := []rune(line)
-		pad := colW - len(runes)
-		if pad > 0 {
-			line += strings.Repeat(" ", pad)
-			runes = []rune(line)
+		if pad := colW - len(runes); pad > 0 {
+			runes = append(runes, []rune(strings.Repeat(" ", pad))...)
 		} else if pad < 0 {
 			runes = runes[:max(colW, 3)]
-			line = string(runes)
 		}
 
 		bg := t.Background
@@ -2157,8 +2183,21 @@ func (m Model) renderImageList(w, vw, h int) (string, string) {
 			bg = lipgloss.Color("#2d4a2e")
 		}
 		bgStyle := lipgloss.NewStyle().Background(bg)
-		row := bgStyle.Render(" ") +
-			bgStyle.Foreground(t.Foreground).Render(string(runes[1:]))
+
+		// STATUS: the leading separator space and trailing pad stay on the row
+		// color; only the label itself carries the status color.
+		statusEnd := statusCol + len([]rune(st.label))
+		row := bgStyle.Render(seg(runes, 0, 1)) +
+			bgStyle.Copy().Foreground(st.color).Render(seg(runes, 1, 2)) +
+			bgStyle.Foreground(t.Foreground).Render(seg(runes, 2, statusCol)) +
+			bgStyle.Copy().Foreground(st.color).Render(seg(runes, statusCol, statusEnd)) +
+			bgStyle.Foreground(t.Foreground).Render(seg(runes, statusEnd, sizeCol)) +
+			bgStyle.Foreground(t.Foreground).Render(seg(runes, sizeCol, sizeCol+sizeW-len([]rune(size))+len([]rune(sizeNum)))) +
+			bgStyle.Copy().Foreground(sizeUnitColor(sizeUnit)).Render(seg(runes, sizeCol+sizeW-len([]rune(size))+len([]rune(sizeNum)), sizeCol+sizeW)) +
+			bgStyle.Foreground(t.Foreground).Render(seg(runes, sizeCol+sizeW, idCol)) +
+			bgStyle.Copy().Foreground(t.Muted).Render(seg(runes, idCol, idCol+idPrefixLen)) +
+			bgStyle.Foreground(t.Foreground).Render(seg(runes, idCol+idPrefixLen, idCol+idPrefixLen+idHexLen)) +
+			bgStyle.Foreground(t.Foreground).Render(seg(runes, idCol+idPrefixLen+idHexLen, len(runes)))
 		rows = append(rows, row)
 	}
 	return header + "\n" + sep, lipgloss.JoinVertical(lipgloss.Top, rows...)
@@ -2166,15 +2205,34 @@ func (m Model) renderImageList(w, vw, h int) (string, string) {
 
 func formatImageSize(bytes int64) string {
 	switch {
+	case bytes >= 1<<40:
+		return fmt.Sprintf("%.1f TB", float64(bytes)/float64(1<<40))
 	case bytes >= 1<<30:
-		return fmt.Sprintf("%.1fGB", float64(bytes)/float64(1<<30))
+		return fmt.Sprintf("%.1f GB", float64(bytes)/float64(1<<30))
 	case bytes >= 1<<20:
-		return fmt.Sprintf("%.1fMB", float64(bytes)/float64(1<<20))
+		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(1<<20))
 	case bytes >= 1<<10:
-		return fmt.Sprintf("%.1fKB", float64(bytes)/float64(1<<10))
+		return fmt.Sprintf("%.1f KB", float64(bytes)/float64(1<<10))
 	default:
-		return fmt.Sprintf("%dB", bytes)
+		return fmt.Sprintf("%d B", bytes)
 	}
+}
+
+// formatImageID renders an image id column: the digest scheme prefix stays
+// fixed-width while the hex payload is truncated to 12 chars, mirroring how the
+// docker CLI shortens ids. The caller paints the "sha256:" prefix muted.
+func formatImageID(id string) string {
+	if strings.HasPrefix(id, "sha256:") {
+		hex := id[len("sha256:"):]
+		if len(hex) > 12 {
+			hex = hex[:12]
+		}
+		return "sha256:" + hex
+	}
+	if len(id) > 19 {
+		id = id[:19]
+	}
+	return id
 }
 
 func formatCreated(created int64) string {

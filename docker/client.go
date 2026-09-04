@@ -47,10 +47,11 @@ type Port struct {
 }
 
 type Image struct {
-	ID       string
-	RepoTags []string
-	Created  int64
-	Size     int64
+	ID         string
+	RepoTags   []string
+	Created    int64
+	Size       int64
+	Containers int64 // number of containers using this image; -1 when unknown
 }
 
 type Volume struct {
@@ -194,10 +195,11 @@ func (c *Client) ListImages(all bool) ([]Image, error) {
 	out := make([]Image, 0, len(res.Items))
 	for _, s := range res.Items {
 		out = append(out, Image{
-			ID:       s.ID,
-			RepoTags: s.RepoTags,
-			Created:  s.Created,
-			Size:     s.Size,
+			ID:         s.ID,
+			RepoTags:   s.RepoTags,
+			Created:    s.Created,
+			Size:       s.Size,
+			Containers: s.Containers,
 		})
 	}
 	return out, nil

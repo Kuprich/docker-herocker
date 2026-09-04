@@ -24,6 +24,33 @@ func stateColor(state string) lipgloss.Color {
 	}
 }
 
+// imageStatus classifies an image by whether any container uses it and
+// whether it still carries a tag, mirroring the container table styling.
+type imageStatus struct {
+	label string // IN-USE / UNUSED / DANGLING
+	dot   string // ● / ○
+	color lipgloss.Color
+}
+
+// classifyImage maps an image to its status. Containers>0 means at least one
+// container is using it; -1 (unknown) is treated as 0. An image with no tags
+// is dangling (a prune candidate).
+func classifyImage(containers int64, ntags int) imageStatus {
+	if containers > 0 {
+		return imageStatus{"IN-USE", "●", t.Success}
+	}
+	if ntags == 0 {
+		return imageStatus{"DANGLING", "○", t.Warning}
+	}
+	return imageStatus{"UNUSED", "●", t.Muted}
+}
+
+// sizeUnitColor paints the size unit uniformly gray so it does not compete
+// with the numeric value itself.
+func sizeUnitColor(unit string) lipgloss.Color {
+	return t.Muted
+}
+
 // colorize wraps value in color and pads the remainder to maxW with the
 // theme background - an ANSI reset inside the styled value would otherwise
 // leave the rest of the line with the default terminal background.
