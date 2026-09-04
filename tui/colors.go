@@ -45,6 +45,25 @@ func classifyImage(containers int64, ntags int) imageStatus {
 	return imageStatus{"UNUSED", "●", t.Muted}
 }
 
+// volumeStatus classifies a volume like the container table styling: a volume
+// is IN-USE when any container references it (daemon's RefCount, stopping
+// containers included), otherwise it is unused and a prune candidate.
+type volumeStatus struct {
+	label string // IN-USE / UNUSED
+	dot   string // ● / ○
+	color lipgloss.Color
+}
+
+// classifyVolume maps a volume's reference count to its status. RefCount<=0
+// (which also covers -1 "unknown" or a missing UsageData) means no container
+// uses the volume.
+func classifyVolume(refCount int64) volumeStatus {
+	if refCount > 0 {
+		return volumeStatus{"IN-USE", "●", t.Success}
+	}
+	return volumeStatus{"UNUSED", "○", t.Muted}
+}
+
 // sizeUnitColor paints the size unit uniformly gray so it does not compete
 // with the numeric value itself.
 func sizeUnitColor(unit string) lipgloss.Color {

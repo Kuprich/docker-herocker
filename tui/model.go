@@ -2315,7 +2315,7 @@ func (m Model) renderVolumeList(w, vw, h int) (string, string) {
 		return "", MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No volumes found"))
 	}
 
-	hdr := fmt.Sprintf("     %-24s %-16s  %-30s  %-14s", "NAME", "DRIVER", "MOUNTPOINT", "SCOPE")
+	hdr := fmt.Sprintf("     %-34s %-9s  %10s  %-16s  %-30s  %-14s", "NAME", "STATUS", "SIZE", "DRIVER", "MOUNTPOINT", "SCOPE")
 	padding := w - len([]rune(hdr))
 	if padding > 0 {
 		hdr += strings.Repeat(" ", padding)
@@ -2323,23 +2323,51 @@ func (m Model) renderVolumeList(w, vw, h int) (string, string) {
 	header := lipgloss.NewStyle().Background(t.Background).Foreground(t.Accent).Bold(true).Render(hdr)
 	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
 
+	// Fixed rune offsets of the row produced by the format string
+	// (" %s  %-34s %-9s  %10s  %-16s  %-30s  %-14s"): the dot column is [0..4),
+	// then NAME / STATUS, with SIZE right-aligned (units stack in one vertical
+	// line), then DRIVER / MOUNTPOINT / SCOPE, all flush-left.
+	const (
+		statusCol = 39 // STATUS label begins here
+		sizeCol   = 50 // SIZE begins here
+		sizeW     = 10 // SIZE column width
+	)
+	seg := func(runes []rune, from, to int) string {
+		if from > len(runes) {
+			from = len(runes)
+		}
+		if to > len(runes) {
+			to = len(runes)
+		}
+		if from > to {
+			from = to
+		}
+		return string(runes[from:to])
+	}
+
 	var rows []string
 	for i := range m.volumes {
 		v := &m.volumes[i]
-		name := Truncate(v.Name, 24)
+		name := Truncate(v.Name, 34)
 		driver := Truncate(v.Driver, 16)
 		mp := Truncate(v.Mountpoint, 30)
 		scope := Truncate(v.Scope, 14)
+		size := Truncate(formatImageSize(v.Size), sizeW)
+		// Split "1.5 GB" into the numeric part and the unit so the SIZE value
+		// can be colored independently of its magnitude marker.
+		sizeNum, sizeUnit := size, ""
+		if k := strings.IndexRune(size, ' '); k >= 0 {
+			sizeNum, sizeUnit = size[:k], size[k+1:]
+		}
 
-		line := fmt.Sprintf(" %s  %-24s %-16s  %-30s  %-14s", "●", name, driver, mp, scope)
+		st := classifyVolume(v.RefCount)
+
+		line := fmt.Sprintf(" %s  %-34s %-9s  %10s  %-16s  %-30s  %-14s", st.dot, name, st.label, size, driver, mp, scope)
 		runes := []rune(line)
-		pad := colW - len(runes)
-		if pad > 0 {
-			line += strings.Repeat(" ", pad)
-			runes = []rune(line)
+		if pad := colW - len(runes); pad > 0 {
+			runes = append(runes, []rune(strings.Repeat(" ", pad))...)
 		} else if pad < 0 {
 			runes = runes[:max(colW, 3)]
-			line = string(runes)
 		}
 
 		bg := t.Background
@@ -2347,8 +2375,18 @@ func (m Model) renderVolumeList(w, vw, h int) (string, string) {
 			bg = lipgloss.Color("#2d4a2e")
 		}
 		bgStyle := lipgloss.NewStyle().Background(bg)
-		row := bgStyle.Render(" ") +
-			bgStyle.Foreground(t.Foreground).Render(string(runes[1:]))
+
+		// STATUS: the leading separator space and trailing pad stay on the row
+		// color; only the dot and the label carry the status color.
+		statusEnd := statusCol + len([]rune(st.label))
+		row := bgStyle.Render(seg(runes, 0, 1)) +
+			bgStyle.Copy().Foreground(st.color).Render(seg(runes, 1, 2)) +
+			bgStyle.Foreground(t.Foreground).Render(seg(runes, 2, statusCol)) +
+			bgStyle.Copy().Foreground(st.color).Render(seg(runes, statusCol, statusEnd)) +
+			bgStyle.Foreground(t.Foreground).Render(seg(runes, statusEnd, sizeCol)) +
+			bgStyle.Foreground(t.Foreground).Render(seg(runes, sizeCol, sizeCol+sizeW-len([]rune(size))+len([]rune(sizeNum)))) +
+			bgStyle.Copy().Foreground(sizeUnitColor(sizeUnit)).Render(seg(runes, sizeCol+sizeW-len([]rune(size))+len([]rune(sizeNum)), sizeCol+sizeW)) +
+			bgStyle.Foreground(t.Foreground).Render(seg(runes, sizeCol+sizeW, len(runes)))
 		rows = append(rows, row)
 	}
 	return header + "\n" + sep, lipgloss.JoinVertical(lipgloss.Top, rows...)

@@ -94,6 +94,35 @@ func TestClassifyImage(tt *testing.T) {
 }
 
 
+func TestClassifyVolume(tt *testing.T) {
+	cases := []struct {
+		name      string
+		refCount  int64
+		wantLabel string
+		wantDot   string
+	}{
+		{"referenced by a container", 1, "IN-USE", "●"},
+		{"referenced by several containers", 3, "IN-USE", "●"},
+		{"unused", 0, "UNUSED", "○"},
+		{"unknown ref count treated as unused", -1, "UNUSED", "○"},
+	}
+	for _, c := range cases {
+		st := classifyVolume(c.refCount)
+		if st.label != c.wantLabel {
+			tt.Errorf("%s: label = %q, want %q", c.name, st.label, c.wantLabel)
+		}
+		if st.dot != c.wantDot {
+			tt.Errorf("%s: dot = %q, want %q", c.name, st.dot, c.wantDot)
+		}
+	}
+	if got := classifyVolume(1).color; got != t.Success {
+		tt.Errorf("IN-USE color = %q, want success green", got)
+	}
+	if got := classifyVolume(0).color; got != t.Muted {
+		tt.Errorf("UNUSED color = %q, want muted gray", got)
+	}
+}
+
 func TestRenderPortsCellFillsWidthWithBackground(tt *testing.T) {
 	// lipgloss downgrades to the Ascii profile when stdout is not a TTY;
 	// force TrueColor so the emitted SGR sequences assert the real palette.
@@ -617,6 +646,85 @@ func TestImageListRendersDotsAndStatusLabels(tt *testing.T) {
 	assertRow(0, "●", "IN-USE", "1.0 GB", "aaaa", "GB", "2023-11-15")
 	assertRow(1, "●", "UNUSED", "1.0 MB", "bbbb", "MB", "2023-11-15")
 	assertRow(2, "○", "DANGLING", "32.0 MB", "cccc", "MB", "2023-11-15")
+}
+
+func TestVolumeListRendersDotsAndStatusLabels(tt *testing.T) {
+	// lipgloss downgrades to the Ascii profile when stdout is not a TTY;
+	// force TrueColor so the emitted SGR sequences assert the real palette.
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	tt.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+
+	m := New(nil)
+	m.width = 150
+	m.height = 30
+	m.ready = true
+	m.loading = false
+	m.volumes = []docker.Volume{
+		{Name: "postgres_data", Driver: "local", Mountpoint: "/var/lib/docker/volumes/postgres_data/_data", Scope: "local", CreatedAt: "2026-01-01", RefCount: 2, Size: 1 << 30},
+		{Name: "orphan", Driver: "local", Mountpoint: "/var/lib/docker/volumes/orphan/_data", Scope: "local", CreatedAt: "2026-01-02", RefCount: 0, Size: 1 << 20},
+		{Name: "unknown", Driver: "local", Mountpoint: "/var/lib/docker/volumes/unknown/_data", Scope: "local", CreatedAt: "2026-01-03", RefCount: -1, Size: 1 << 25},
+	}
+	m.fitMainViewport()
+
+	w, vw, h := innerW(m.width), innerW(m.width)-1, m.height-tabBarHeight-helpBarHeight
+	hdr, rows := m.renderVolumeList(w, vw, h)
+	if !strings.Contains(hdr, "STATUS") {
+		tt.Errorf("header lacks a STATUS column: %q", stripANSI(hdr))
+	}
+	if !strings.Contains(hdr, "SIZE") {
+		tt.Errorf("header lacks a SIZE column: %q", stripANSI(hdr))
+	}
+
+	lines := strings.Split(stripANSI(rows), "\n")
+	if len(lines) != len(m.volumes) {
+		tt.Fatalf("got %d rows, want %d", len(lines), len(m.volumes))
+	}
+
+	// Fixed offsets of the row format (" %s  %-34s %-9s  %10s  ...").
+	const (
+		statusCol = 39 // STATUS label begins here
+		sizeEnd   = 60 // last rune of the right-aligned SIZE column
+	)
+	assertRow := func(i int, wantDot, wantLabel, wantSize, wantUnit string) {
+		runes := []rune(lines[i])
+		if len(runes) < 2 {
+			tt.Fatalf("row %d too short: %q", i, lines[i])
+		}
+		if string(runes[1]) != wantDot {
+			tt.Errorf("row %d dot = %q, want %q", i, string(runes[1]), wantDot)
+		}
+		got := string(runes[statusCol : statusCol+len([]rune(wantLabel))])
+		if got != wantLabel {
+			tt.Errorf("row %d label at col %d = %q, want %q (line %q)", i, statusCol, got, wantLabel, lines[i])
+		}
+		if !strings.Contains(lines[i], wantSize) {
+			tt.Errorf("row %d missing size %q in %q", i, wantSize, lines[i])
+		}
+		// SIZE is right-aligned, so units stack in one vertical line at the
+		// right edge of the column.
+		if got := string(runes[sizeEnd-len([]rune(wantUnit)) : sizeEnd]); got != wantUnit {
+			tt.Errorf("row %d unit at right edge = %q, want %q (line %q)", i, got, wantUnit, lines[i])
+		}
+		// the mountpoint keeps its full path (truncated to the column width)
+		// so a volume row is distinguished by more than the size.
+		if !strings.Contains(lines[i], "/var/lib/docker/volumes") {
+			tt.Errorf("row %d missing mountpoint in %q", i, lines[i])
+		}
+	}
+
+	assertRow(0, "●", "IN-USE", "1.0 GB", "GB")
+	assertRow(1, "○", "UNUSED", "1.0 MB", "MB")
+	assertRow(2, "○", "UNUSED", "32.0 MB", "MB")
+
+	// IN-USE renders with the success green, UNUSED with the muted gray (both
+	// on the row background; the borderless test pattern uses the bare code).
+	if !strings.Contains(rows, "38;2;63;185;80") {
+		tt.Errorf("IN-USE status should be success green (63;185;80):\n%s", rows)
+	}
+	if !strings.Contains(rows, "38;2;139;147;158") {
+		tt.Errorf("UNUSED status should be muted gray (139;147;158):\n%s", rows)
+	}
 }
 
 func TestFormatImageSizeSeparatesValueAndUnit(tt *testing.T) {

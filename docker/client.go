@@ -60,6 +60,8 @@ type Volume struct {
 	Mountpoint string
 	CreatedAt  string
 	Scope      string
+	RefCount   int64 // containers referencing this volume (daemon-computed); -1 when unknown
+	Size       int64 // bytes used by the volume; -1 when the driver does not report it
 }
 
 type Network struct {
@@ -205,19 +207,32 @@ func (c *Client) ListImages(all bool) ([]Image, error) {
 	return out, nil
 }
 
+// ListVolumes returns every volume with its daemon-computed usage: how many
+// containers reference it (including stopped ones, so a volume tied to a
+// stopped container still counts as IN USE) and its on-disk size. The plain
+// /volumes endpoint never includes usage details — only the disk-usage report
+// does — and the detailed per-volume Items are only filled with Verbose, so
+// this issues a verbose /system/df query restricted to volumes.
 func (c *Client) ListVolumes() ([]Volume, error) {
-	res, err := c.cli.VolumeList(context.Background(), mclient.VolumeListOptions{})
+	res, err := c.cli.DiskUsage(context.Background(), mclient.DiskUsageOptions{Volumes: true, Verbose: true})
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Volume, 0, len(res.Items))
-	for _, v := range res.Items {
+	items := res.Volumes.Items
+	out := make([]Volume, 0, len(items))
+	for _, v := range items {
+		refCount, size := int64(0), int64(0)
+		if u := v.UsageData; u != nil {
+			refCount, size = u.RefCount, u.Size
+		}
 		out = append(out, Volume{
 			Name:       v.Name,
 			Driver:     v.Driver,
 			Mountpoint: v.Mountpoint,
 			CreatedAt:  v.CreatedAt,
 			Scope:      v.Scope,
+			RefCount:   refCount,
+			Size:       size,
 		})
 	}
 	return out, nil

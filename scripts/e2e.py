@@ -491,6 +491,31 @@ def x_key_opens_context_menu(s):
 
 
 @check
+def three_key_shows_volume_statuses(s):
+    s.drain(3.0)
+
+    # the 3 key opens the Volumes tab; the table now carries STATUS and SIZE
+    # columns and marks each volume IN-USE (● green) or UNUSED (○ gray)
+    mark = len(s.allbuf)
+    s.send(b"3"); time.sleep(0.05)
+    s.drain(0.9)
+    tail = s.allbuf[mark:].decode("utf-8", "replace")
+    assert "STATUS" in tail, "volumes table lacks a STATUS column"
+    assert "SIZE" in tail, "volumes table lacks a SIZE column"
+    assert "UNUSED" in tail, "no volume marked UNUSED"
+
+    # the list is sorted by name and longer than the screen; scroll to the
+    # bottom so an in-use volume (IN-USE, success green) comes into view
+    for _ in range(80):
+        s.send(b"j"); time.sleep(0.03); s.drain(0.03)
+    s.drain(0.9)
+    tail = s.allbuf[mark:].decode("utf-8", "replace")
+    assert "IN-USE" in tail, "no volume marked IN-USE (is any container mounted?) "
+    assert re.search(r"\x1b\[[0-9;]*38;2;63;185;80[0-9;]*m", tail), \
+        "no IN-USE dot/label rendered green"
+
+
+@check
 def narrow_terminal_no_panic(s):
     # reuse current session with a resize instead of a second spawn
     winsize = struct.pack("HHHH", 20, 100, 0, 0)
