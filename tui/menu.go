@@ -25,6 +25,7 @@ type menuItem struct {
 	children      []menuItem
 	confirm       bool
 	removeVolumes bool // pairs with confirm: "Remove with data" variant
+	confirmHeader string // confirm-stage header (used outside the Containers tab)
 	activate      func() tea.Cmd
 }
 
@@ -82,26 +83,18 @@ func (m Model) containerMenuItems(c docker.Container) []menuItem {
 	return append(items, remove)
 }
 
-// enterRemoveConfirm swaps the popup into the destructive-action stage: a
-// header naming the target plus Yes/No items. withData selects the variant
-// that also removes the container's volumes. The selection resets to Yes so
-// a deliberate second Enter executes; Esc still cancels.
-func (m *Model) enterRemoveConfirm(withData bool) {
-	c := m.containers[m.selectedIdx]
-	name := containerDisplayName(c)
+// enterConfirmStage swaps the popup into the destructive-action stage: a
+// header naming the target plus Yes/No items. yes is the tea.Cmd to dispatch
+// when the user confirms; nil-returning no-op keeps the popup open and is
+// closed by menuActivate. The selection resets to Yes so a deliberate second
+// Enter executes; Esc still cancels.
+func (m *Model) enterConfirmStage(header string, yes func() tea.Cmd) {
 	m.menu.confirm = true
 	m.menu.sel = 0
 	m.menu.stack = nil
-	m.menu.header = "Remove " + name + "?"
-	if withData {
-		m.menu.header = "Remove " + name + " and its volumes?"
-	}
-	remove := m.removeContainer
-	if withData {
-		remove = m.removeContainerVolumes
-	}
+	m.menu.header = header
 	m.menu.items = []menuItem{
-		{label: "Yes, remove", activate: remove},
+		{label: "Yes, remove", activate: yes},
 		{label: "No, cancel", activate: func() tea.Cmd { return nil }},
 	}
 	m.menu.w, m.menu.h = menuMeasure(m.menu.items, m.menu.header)
@@ -162,6 +155,103 @@ func (m Model) buildContainerMenu() popupMenu {
 		y:      max((m.height-h)/2, tabBarHeight+1),
 		w:      w,
 		h:      h,
+	}
+}
+
+// buildImageMenu builds the popup for the selected image, centered on the
+// screen like the container menu. The keyboard x opens it on the Images tab.
+func (m Model) buildImageMenu() popupMenu {
+	img := m.images[m.selectedIdx]
+	items := m.imageMenuItems(img)
+	header := "Actions for image " + imageDisplayName(img)
+	w, h := menuMeasure(items, header)
+	return popupMenu{
+		items:  items,
+		header: header,
+		x:      max((m.width-w)/2, 0),
+		y:      max((m.height-h)/2, tabBarHeight+1),
+		w:      w,
+		h:      h,
+	}
+}
+
+// imageMenuItems builds the first-stage actions for an image, adapting to its
+// status: an image in use does not allow a plain removal (the daemon rejects
+// it), so it only offers "Force remove" (untag); unused and dangling images
+// offer "Remove". "Prune dangling" cleans every dangling image and is shown
+// only when at least one exists in the current list.
+func (m Model) imageMenuItems(img docker.Image) []menuItem {
+	st := classifyImage(img.Containers, len(img.RepoTags))
+	name := imageDisplayName(img)
+
+	removeLabel := "Remove"
+	if st.label == "IN-USE" {
+		removeLabel = "Force remove"
+	}
+
+	hasDangling := false
+	for _, im := range m.images {
+		if len(im.RepoTags) == 0 {
+			hasDangling = true
+			break
+		}
+	}
+
+	items := []menuItem{
+		{
+			label:         removeLabel,
+			key:           "d",
+			confirm:       true,
+			confirmHeader: removeLabel + " " + name + "?",
+			activate:      func() tea.Cmd { return m.imageRemoveCmd(img.ID, st.label == "IN-USE") },
+		},
+	}
+	if hasDangling {
+		items = append(items, menuItem{
+			label:         "Prune dangling",
+			key:           "p",
+			confirm:       true,
+			confirmHeader: "Prune all dangling images?",
+			activate:      m.pruneImagesCmd,
+		})
+	}
+	return items
+}
+
+// imageDisplayName returns the first tag of an image, falling back to the
+// short sha256 digest when the image is dangling (no tags).
+func imageDisplayName(img docker.Image) string {
+	if len(img.RepoTags) > 0 {
+		return img.RepoTags[0]
+	}
+	if len(img.ID) > 7 && img.ID[:7] == "sha256:" {
+		return "sha256:" + img.ID[7:19]
+	}
+	if n := len(img.ID); n > 12 {
+		return img.ID[:12]
+	}
+	return img.ID
+}
+
+// imageRemoveCmd / pruneImagesCmd act on the selected image (or all dangling
+// images) and refresh the list, mirroring removeContainerCmd.
+func (m Model) imageRemoveCmd(id string, force bool) tea.Cmd {
+	return func() tea.Msg {
+		if err := m.docker.RemoveImage(id, force); err != nil {
+			return errMsg{err}
+		}
+		time.Sleep(500 * time.Millisecond)
+		return m.refreshNow()()
+	}
+}
+
+func (m Model) pruneImagesCmd() tea.Cmd {
+	return func() tea.Msg {
+		if err := m.docker.PruneImages(); err != nil {
+			return errMsg{err}
+		}
+		time.Sleep(500 * time.Millisecond)
+		return m.refreshNow()()
 	}
 }
 
@@ -273,7 +363,16 @@ func (m *Model) menuActivate(i int) tea.Cmd {
 		return nil
 	}
 	if it.confirm {
-		m.enterRemoveConfirm(it.removeVolumes)
+		switch {
+		case it.removeVolumes:
+			c := m.containers[m.selectedIdx]
+			m.enterConfirmStage("Remove "+containerDisplayName(c)+" and its volumes?", m.removeContainerVolumes)
+		case m.activeTab == tabContainers:
+			c := m.containers[m.selectedIdx]
+			m.enterConfirmStage("Remove "+containerDisplayName(c)+"?", m.removeContainer)
+		default:
+			m.enterConfirmStage(it.confirmHeader, it.activate)
+		}
 		return nil
 	}
 	wasConfirm := m.menu.confirm

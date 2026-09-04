@@ -245,6 +245,18 @@ func stopTimeout(seconds int) *int {
 	return &t
 }
 
+func (c *Client) RemoveImage(id string, force bool) error {
+	_, err := c.cli.ImageRemove(context.Background(), id, mclient.ImageRemoveOptions{Force: force, PruneChildren: true})
+	return err
+}
+
+// PruneImages deletes all dangling images (no longer referenced by any tag).
+func (c *Client) PruneImages() error {
+	filters := mclient.Filters{}.Add("dangling", "true")
+	_, err := c.cli.ImagePrune(context.Background(), mclient.ImagePruneOptions{Filters: filters})
+	return err
+}
+
 func (c *Client) StartContainer(id string) error {
 	_, err := c.cli.ContainerStart(context.Background(), id, mclient.ContainerStartOptions{})
 	return err

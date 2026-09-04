@@ -655,6 +655,18 @@ func TestFormatImageIDKeepsPrefixAndTruncatesHex(tt *testing.T) {
 	}
 }
 
+func TestImageDisplayName(tt *testing.T) {
+	longID := "sha256:" + strings.Repeat("a", 64)
+	tagged := docker.Image{ID: longID, RepoTags: []string{"nginx:latest"}}
+	if got := imageDisplayName(tagged); got != "nginx:latest" {
+		tt.Errorf("tagged: %q, want nginx:latest", got)
+	}
+	dangling := docker.Image{ID: longID}
+	if got := imageDisplayName(dangling); got != "sha256:aaaaaaaaaaaa" {
+		tt.Errorf("dangling: %q, want sha256:aaaaaaaaaaaa", got)
+	}
+}
+
 func TestStaleForeignMsgDoesNotResetWhenInRange(tt *testing.T) {
 	m := New(nil)
 	m.width = 120
@@ -2160,7 +2172,8 @@ func TestRenderContainerMenuShape(tt *testing.T) {
 
 	// two-stage Remove: entering the confirm swap rebuilds the box with a
 	// header naming the target plus Yes/No items
-	m.enterRemoveConfirm(false)
+	c := m.containers[m.selectedIdx]
+	m.enterConfirmStage("Remove "+containerDisplayName(c)+"?", m.removeContainer)
 	crows := m.renderContainerMenu()
 	if len(crows) != m.menu.h {
 		tt.Errorf("confirm rows = %d, want %d", len(crows), m.menu.h)
@@ -2184,7 +2197,7 @@ func TestRenderContainerMenuShape(tt *testing.T) {
 
 	// the "Remove with data" variant: same confirm layout, its own header and
 	// the Yes item still selected
-	m.enterRemoveConfirm(true)
+	m.enterConfirmStage("Remove "+containerDisplayName(c)+" and its volumes?", m.removeContainerVolumes)
 	drows := m.renderContainerMenu()
 	if len(drows) != m.menu.h {
 		tt.Errorf("data-confirm rows = %d, want %d", len(drows), m.menu.h)
@@ -2518,11 +2531,135 @@ func TestKeyXOpensContextMenu(tt *testing.T) {
 		tt.Errorf("popup x after k = %d, want centered %d", next.menu.x, want)
 	}
 
-	// x on another tab must not open the popup
+	// x on another tab with no rows must not open the popup
 	m.activeTab = tabImages
 	next, _ = testUpdate(m, x)
 	if next.menuOpen {
-		tt.Fatal("x must not open the popup outside the Containers tab")
+		tt.Fatal("x must not open the popup on an empty Images tab")
+	}
+	m.activeTab = tabVolumes
+	next, _ = testUpdate(m, x)
+	if next.menuOpen {
+		tt.Fatal("x must not open the popup on the Volumes tab")
+	}
+}
+
+func TestKeyXOpensImageMenu(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.images = []docker.Image{
+		{ID: "sha256:" + strings.Repeat("a", 64), RepoTags: []string{"app:latest"}, Containers: 2},
+		{ID: "sha256:" + strings.Repeat("b", 64), RepoTags: []string{"busybox:latest"}, Containers: 0},
+	}
+	m.activeTab = tabImages
+	m.selectedIdx = 1
+	m.fitViewports()
+
+	x := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}
+	next, cmd := testUpdate(m, x)
+	if !next.menuOpen {
+		tt.Fatal("x should open the popup on the selected image")
+	}
+	if cmd != nil {
+		tt.Error("x must not dispatch an action")
+	}
+	if got := next.menu.header; got != "Actions for image busybox:latest" {
+		tt.Errorf("menu title = %q", got)
+	}
+	if got := next.menu.items[0].label; got != "Remove" {
+		tt.Errorf("first item = %q, want Remove for an unused image", got)
+	}
+	if want := max((next.width-next.menu.w)/2, 0); next.menu.x != want {
+		tt.Errorf("popup x = %d, want centered %d", next.menu.x, want)
+	}
+}
+
+func TestImageMenuVariesByStatus(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.activeTab = tabImages
+
+	// IN-USE images cannot be removed plainly: only "Force remove" is offered.
+	m.images = []docker.Image{{ID: "sha256:" + strings.Repeat("a", 64), RepoTags: []string{"app:latest"}, Containers: 1}}
+	m.fitViewports()
+	items := m.imageMenuItems(m.images[0])
+	if got := items[0].label; got != "Force remove" {
+		tt.Errorf("in-use item = %q, want Force remove", got)
+	}
+
+	// UNUSED images offer a plain Remove.
+	m.images = []docker.Image{{ID: "sha256:" + strings.Repeat("a", 64), RepoTags: []string{"app:latest"}, Containers: 0}}
+	m.fitViewports()
+	items = m.imageMenuItems(m.images[0])
+	if got := items[0].label; got != "Remove" {
+		tt.Errorf("unused item = %q, want Remove", got)
+	}
+}
+
+func TestImageMenuPruneOnlyWithDangling(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.activeTab = tabImages
+
+	labelled := []menuItem{}
+	m.images = []docker.Image{
+		{ID: "sha256:" + strings.Repeat("a", 64), RepoTags: []string{"app:latest"}},
+		{ID: "sha256:" + strings.Repeat("b", 64), RepoTags: []string{"busybox:latest"}},
+	}
+	m.fitViewports()
+	labelled = m.imageMenuItems(m.images[0])
+	if len(labelled) != 1 {
+		tt.Fatalf("menu without dangling = %d items, want 1", len(labelled))
+	}
+
+	// one dangling image unlocks the prune action
+	m.images = append(m.images, docker.Image{ID: "sha256:" + strings.Repeat("c", 64), RepoTags: nil})
+	m.fitViewports()
+	items := m.imageMenuItems(m.images[0])
+	if len(items) != 2 {
+		tt.Fatalf("menu with dangling = %d items, want 2", len(items))
+	}
+	if got := items[1].label; got != "Prune dangling" {
+		tt.Errorf("second item = %q, want Prune dangling", got)
+	}
+	if !items[1].confirm {
+		tt.Error("Prune dangling must stage a confirm")
+	}
+}
+
+func TestImageMenuConfirmFlow(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.activeTab = tabImages
+	m.images = []docker.Image{
+		{ID: "sha256:" + strings.Repeat("a", 64), RepoTags: []string{"app:latest"}, Containers: 2},
+		{ID: "sha256:" + strings.Repeat("b", 64), RepoTags: []string{"busybox:latest"}, Containers: 0},
+	}
+	m.selectedIdx = 1
+	m.fitViewports()
+
+	x := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}
+	next := testMouseUpdate(m, x)
+
+	// Enter on the first (Remove) row enters the destructive confirm stage
+	enter := tea.KeyMsg{Type: tea.KeyEnter}
+	next, _ = testUpdate(next, enter)
+	if !next.menu.confirm {
+		tt.Fatal("Enter on Remove should stage the confirm stage")
+	}
+	if got := next.menu.items[0].label; got != "Yes, remove" {
+		tt.Errorf("confirm first item = %q, want Yes, remove", got)
+	}
+	if got := next.menu.header; got != "Remove busybox:latest?" {
+		tt.Errorf("confirm header = %q", got)
 	}
 }
 
