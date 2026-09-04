@@ -2002,7 +2002,7 @@ func (m Model) renderContainerList(w, vw, h int) (string, string) {
 	if len(m.containers) == 0 {
 		return "", MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No containers found"))
 	}
-	hdr := fmt.Sprintf("     %-29s %-11s  %7s   %13s   %-20s  %-22s", "NAME", "STATE", "CPU %", "MEM", "IMAGE", "PORTS")
+	hdr := fmt.Sprintf("    %-29s %-11s  %7s    %-13s %-20s  %-22s", "NAME", "STATE", "CPU %", "MEM", "IMAGE", "PORTS")
 	if pad := w - len([]rune(hdr)); pad > 0 {
 		hdr += strings.Repeat(" ", pad)
 	}
