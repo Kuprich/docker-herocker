@@ -502,6 +502,7 @@ def three_key_shows_volume_statuses(s):
     tail = s.allbuf[mark:].decode("utf-8", "replace")
     assert "STATUS" in tail, "volumes table lacks a STATUS column"
     assert "SIZE" in tail, "volumes table lacks a SIZE column"
+    assert "CREATED" in tail, "volumes table lacks a CREATED column"
     assert "UNUSED" in tail, "no volume marked UNUSED"
 
     # the list is sorted by name and longer than the screen; scroll to the

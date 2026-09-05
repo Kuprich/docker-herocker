@@ -661,9 +661,9 @@ func TestVolumeListRendersDotsAndStatusLabels(tt *testing.T) {
 	m.ready = true
 	m.loading = false
 	m.volumes = []docker.Volume{
-		{Name: "postgres_data", Driver: "local", Mountpoint: "/var/lib/docker/volumes/postgres_data/_data", Scope: "local", CreatedAt: "2026-01-01", RefCount: 2, Size: 1 << 30},
+		{Name: "postgres_data", Driver: "local", Mountpoint: "/var/lib/docker/volumes/postgres_data/_data", Scope: "local", CreatedAt: "2026-01-01T08:00:00+03:00", RefCount: 2, Size: 1 << 30},
 		{Name: "orphan", Driver: "local", Mountpoint: "/var/lib/docker/volumes/orphan/_data", Scope: "local", CreatedAt: "2026-01-02", RefCount: 0, Size: 1 << 20},
-		{Name: "unknown", Driver: "local", Mountpoint: "/var/lib/docker/volumes/unknown/_data", Scope: "local", CreatedAt: "2026-01-03", RefCount: -1, Size: 1 << 25},
+		{Name: "unknown", Driver: "local", Mountpoint: "/var/lib/docker/volumes/unknown/_data", Scope: "local", RefCount: -1, Size: -1},
 	}
 	m.fitMainViewport()
 
@@ -675,18 +675,26 @@ func TestVolumeListRendersDotsAndStatusLabels(tt *testing.T) {
 	if !strings.Contains(hdr, "SIZE") {
 		tt.Errorf("header lacks a SIZE column: %q", stripANSI(hdr))
 	}
+	if !strings.Contains(hdr, "CREATED") {
+		tt.Errorf("header lacks a CREATED column: %q", stripANSI(hdr))
+	}
+	if strings.Contains(hdr, "DRIVER") || strings.Contains(hdr, "MOUNTPOINT") || strings.Contains(hdr, "SCOPE") {
+		tt.Errorf("header still lists a dropped column: %q", stripANSI(hdr))
+	}
 
 	lines := strings.Split(stripANSI(rows), "\n")
 	if len(lines) != len(m.volumes) {
 		tt.Fatalf("got %d rows, want %d", len(lines), len(m.volumes))
 	}
 
-	// Fixed offsets of the row format (" %s  %-34s %-9s  %10s  ...").
+	// Fixed offsets of the row format (" %s  %-40s %-9s  %10s   %-12s").
 	const (
-		statusCol = 39 // STATUS label begins here
-		sizeEnd   = 60 // last rune of the right-aligned SIZE column
+		statusCol   = 45 // STATUS label begins here
+		sizeEnd     = 66 // last rune of the right-aligned SIZE column
+		createdCol  = 69 // CREATED begins here
+		createdW    = 12 // CREATED column width
 	)
-	assertRow := func(i int, wantDot, wantLabel, wantSize, wantUnit string) {
+	assertRow := func(i int, wantDot, wantLabel, wantSize, wantUnit, wantDate string) {
 		runes := []rune(lines[i])
 		if len(runes) < 2 {
 			tt.Fatalf("row %d too short: %q", i, lines[i])
@@ -703,19 +711,22 @@ func TestVolumeListRendersDotsAndStatusLabels(tt *testing.T) {
 		}
 		// SIZE is right-aligned, so units stack in one vertical line at the
 		// right edge of the column.
-		if got := string(runes[sizeEnd-len([]rune(wantUnit)) : sizeEnd]); got != wantUnit {
+		if got := string(runes[sizeEnd-len([]rune(wantUnit)) : sizeEnd]); wantUnit != "" && got != wantUnit {
 			tt.Errorf("row %d unit at right edge = %q, want %q (line %q)", i, got, wantUnit, lines[i])
 		}
-		// the mountpoint keeps its full path (truncated to the column width)
-		// so a volume row is distinguished by more than the size.
-		if !strings.Contains(lines[i], "/var/lib/docker/volumes") {
-			tt.Errorf("row %d missing mountpoint in %q", i, lines[i])
+		got = string(runes[createdCol : createdCol+createdW])
+		if !strings.HasPrefix(got, wantDate) {
+			tt.Errorf("row %d created at col %d = %q, want prefix %q (line %q)", i, createdCol, got, wantDate, lines[i])
+		}
+		// the dropped columns must no longer be part of a row
+		if strings.Contains(lines[i], "/var/lib/docker/volumes") {
+			tt.Errorf("row %d still renders a mountpoint in %q", i, lines[i])
 		}
 	}
 
-	assertRow(0, "●", "IN-USE", "1.0 GB", "GB")
-	assertRow(1, "○", "UNUSED", "1.0 MB", "MB")
-	assertRow(2, "○", "UNUSED", "32.0 MB", "MB")
+	assertRow(0, "●", "IN-USE", "1.0 GB", "GB", "2026-01-01")
+	assertRow(1, "○", "UNUSED", "1.0 MB", "MB", "2026-01-02")
+	assertRow(2, "○", "UNUSED", "n/a", "", "—")
 
 	// IN-USE renders with the success green, UNUSED with the muted gray (both
 	// on the row background; the borderless test pattern uses the bare code).

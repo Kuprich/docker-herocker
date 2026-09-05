@@ -2270,6 +2270,16 @@ func formatCreated(created int64) string {
 	return t.Format("2006-01-02")
 }
 
+// formatVolumeCreated renders the volume CREATED column as a plain date. The
+// daemon reports volume creation as an ISO string ("2026-07-28T18:08:08+03:00"),
+// so only the leading date part is kept; a missing value renders as an em dash.
+func formatVolumeCreated(iso string) string {
+	if len(iso) < 10 {
+		return "—"
+	}
+	return iso[:10]
+}
+
 // formatCPU renders a CPU percent with two decimals when it is small, one
 // otherwise, clamped to stay inside the column width.
 func formatCPU(pct float64) string {
@@ -2315,7 +2325,7 @@ func (m Model) renderVolumeList(w, vw, h int) (string, string) {
 		return "", MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No volumes found"))
 	}
 
-	hdr := fmt.Sprintf("     %-34s %-9s  %10s  %-16s  %-30s  %-14s", "NAME", "STATUS", "SIZE", "DRIVER", "MOUNTPOINT", "SCOPE")
+	hdr := fmt.Sprintf("    %-40s %-9s  %10s   %-12s", "NAME", "STATUS", "SIZE", "CREATED")
 	padding := w - len([]rune(hdr))
 	if padding > 0 {
 		hdr += strings.Repeat(" ", padding)
@@ -2324,13 +2334,15 @@ func (m Model) renderVolumeList(w, vw, h int) (string, string) {
 	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
 
 	// Fixed rune offsets of the row produced by the format string
-	// (" %s  %-34s %-9s  %10s  %-16s  %-30s  %-14s"): the dot column is [0..4),
-	// then NAME / STATUS, with SIZE right-aligned (units stack in one vertical
-	// line), then DRIVER / MOUNTPOINT / SCOPE, all flush-left.
+	// (" %s  %-40s %-9s  %10s   %-12s"): the dot column is [0..4), then
+	// NAME / STATUS, with SIZE right-aligned (units stack in one vertical
+	// line), then CREATED.
 	const (
-		statusCol = 39 // STATUS label begins here
-		sizeCol   = 50 // SIZE begins here
-		sizeW     = 10 // SIZE column width
+		statusCol  = 45 // STATUS label begins here
+		sizeCol    = 56 // SIZE begins here
+		sizeW      = 10 // SIZE column width
+		createdCol = 69 // CREATED begins here
+		createdW   = 12 // CREATED column width
 	)
 	seg := func(runes []rune, from, to int) string {
 		if from > len(runes) {
@@ -2348,21 +2360,24 @@ func (m Model) renderVolumeList(w, vw, h int) (string, string) {
 	var rows []string
 	for i := range m.volumes {
 		v := &m.volumes[i]
-		name := Truncate(v.Name, 34)
-		driver := Truncate(v.Driver, 16)
-		mp := Truncate(v.Mountpoint, 30)
-		scope := Truncate(v.Scope, 14)
-		size := Truncate(formatImageSize(v.Size), sizeW)
+		name := Truncate(v.Name, 40)
+		var size string
+		if v.Size < 0 {
+			size = "n/a"
+		} else {
+			size = Truncate(formatImageSize(v.Size), sizeW)
+		}
 		// Split "1.5 GB" into the numeric part and the unit so the SIZE value
 		// can be colored independently of its magnitude marker.
 		sizeNum, sizeUnit := size, ""
 		if k := strings.IndexRune(size, ' '); k >= 0 {
 			sizeNum, sizeUnit = size[:k], size[k+1:]
 		}
+		created := Truncate(formatVolumeCreated(v.CreatedAt), createdW)
 
 		st := classifyVolume(v.RefCount)
 
-		line := fmt.Sprintf(" %s  %-34s %-9s  %10s  %-16s  %-30s  %-14s", st.dot, name, st.label, size, driver, mp, scope)
+		line := fmt.Sprintf(" %s  %-40s %-9s  %10s   %-12s", st.dot, name, st.label, size, created)
 		runes := []rune(line)
 		if pad := colW - len(runes); pad > 0 {
 			runes = append(runes, []rune(strings.Repeat(" ", pad))...)
