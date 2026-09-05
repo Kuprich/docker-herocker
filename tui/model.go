@@ -2325,7 +2325,7 @@ func (m Model) renderVolumeList(w, vw, h int) (string, string) {
 		return "", MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No volumes found"))
 	}
 
-	hdr := fmt.Sprintf("    %-40s %-9s  %10s   %-12s", "NAME", "STATUS", "SIZE", "CREATED")
+	hdr := fmt.Sprintf("    %-64s %-9s  %10s   %-12s", "NAME", "STATUS", "SIZE", "CREATED")
 	padding := w - len([]rune(hdr))
 	if padding > 0 {
 		hdr += strings.Repeat(" ", padding)
@@ -2334,14 +2334,15 @@ func (m Model) renderVolumeList(w, vw, h int) (string, string) {
 	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
 
 	// Fixed rune offsets of the row produced by the format string
-	// (" %s  %-40s %-9s  %10s   %-12s"): the dot column is [0..4), then
+	// (" %s  %-64s %-9s  %10s   %-12s"): the dot column is [0..4), then
 	// NAME / STATUS, with SIZE right-aligned (units stack in one vertical
-	// line), then CREATED.
+	// line), then CREATED. NAME is 64 wide so anonymous sha256-based volume
+	// ids are not truncated.
 	const (
-		statusCol  = 45 // STATUS label begins here
-		sizeCol    = 56 // SIZE begins here
+		statusCol  = 69 // STATUS label begins here
+		sizeCol    = 80 // SIZE begins here
 		sizeW      = 10 // SIZE column width
-		createdCol = 69 // CREATED begins here
+		createdCol = 93 // CREATED begins here
 		createdW   = 12 // CREATED column width
 	)
 	seg := func(runes []rune, from, to int) string {
@@ -2360,7 +2361,7 @@ func (m Model) renderVolumeList(w, vw, h int) (string, string) {
 	var rows []string
 	for i := range m.volumes {
 		v := &m.volumes[i]
-		name := Truncate(v.Name, 40)
+		name := Truncate(v.Name, 64)
 		var size string
 		if v.Size < 0 {
 			size = "n/a"
@@ -2377,7 +2378,7 @@ func (m Model) renderVolumeList(w, vw, h int) (string, string) {
 
 		st := classifyVolume(v.RefCount)
 
-		line := fmt.Sprintf(" %s  %-40s %-9s  %10s   %-12s", st.dot, name, st.label, size, created)
+		line := fmt.Sprintf(" %s  %-64s %-9s  %10s   %-12s", st.dot, name, st.label, size, created)
 		runes := []rune(line)
 		if pad := colW - len(runes); pad > 0 {
 			runes = append(runes, []rune(strings.Repeat(" ", pad))...)

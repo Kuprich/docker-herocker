@@ -687,12 +687,12 @@ func TestVolumeListRendersDotsAndStatusLabels(tt *testing.T) {
 		tt.Fatalf("got %d rows, want %d", len(lines), len(m.volumes))
 	}
 
-	// Fixed offsets of the row format (" %s  %-40s %-9s  %10s   %-12s").
+	// Fixed offsets of the row format (" %s  %-64s %-9s  %10s   %-12s").
 	const (
-		statusCol   = 45 // STATUS label begins here
-		sizeEnd     = 66 // last rune of the right-aligned SIZE column
-		createdCol  = 69 // CREATED begins here
-		createdW    = 12 // CREATED column width
+		statusCol  = 69 // STATUS label begins here
+		sizeEnd    = 90 // last rune of the right-aligned SIZE column
+		createdCol = 93 // CREATED begins here
+		createdW   = 12 // CREATED column width
 	)
 	assertRow := func(i int, wantDot, wantLabel, wantSize, wantUnit, wantDate string) {
 		runes := []rune(lines[i])
