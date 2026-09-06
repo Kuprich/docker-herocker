@@ -1921,6 +1921,11 @@ func (m *Model) openContextMenu() {
 			return
 		}
 		m.menu = m.buildVolumeMenu()
+	case tabNetworks:
+		if m.selectedIdx < 0 || m.selectedIdx >= len(m.networks) {
+			return
+		}
+		m.menu = m.buildNetworkMenu()
 	default:
 		return
 	}
@@ -2381,7 +2386,7 @@ func (m Model) renderVolumeList(w, vw, h int) (string, string) {
 		}
 		created := Truncate(formatVolumeCreated(v.CreatedAt), createdW)
 
-		st := classifyVolume(v.RefCount)
+		st := classifyUsage(v.RefCount)
 
 		line := fmt.Sprintf(" %s  %-64s %-9s  %10s   %-12s", st.dot, name, st.label, size, created)
 		runes := []rune(line)
@@ -2422,7 +2427,7 @@ func (m Model) renderNetworkList(w, vw, h int) (string, string) {
 		return "", MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No networks found"))
 	}
 
-	hdr := fmt.Sprintf("     %-28s %-16s  %-16s  %-16s", "NAME", "DRIVER", "ID", "SCOPE")
+	hdr := fmt.Sprintf("    %-34s %-9s  %-16s  %-14s", "NAME", "STATUS", "DRIVER", "SCOPE")
 	padding := w - len([]rune(hdr))
 	if padding > 0 {
 		hdr += strings.Repeat(" ", padding)
@@ -2430,26 +2435,38 @@ func (m Model) renderNetworkList(w, vw, h int) (string, string) {
 	header := lipgloss.NewStyle().Background(t.Background).Foreground(t.Accent).Bold(true).Render(hdr)
 	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
 
+	// Fixed rune offsets of the row produced by the format string
+	// (" %s  %-34s %-9s  %-16s  %-14s"): the dot column is [0..4), then
+	// NAME / STATUS / DRIVER / SCOPE (the full network id is dropped —
+	// usage status matters more in a TUI than the untruncated id).
+	const statusCol = 39 // STATUS label begins here
+	seg := func(runes []rune, from, to int) string {
+		if from > len(runes) {
+			from = len(runes)
+		}
+		if to > len(runes) {
+			to = len(runes)
+		}
+		if from > to {
+			from = to
+		}
+		return string(runes[from:to])
+	}
+
 	var rows []string
 	for i := range m.networks {
 		n := &m.networks[i]
-		name := Truncate(n.Name, 28)
+		name := Truncate(n.Name, 34)
 		driver := Truncate(n.Driver, 16)
-		shortID := Truncate(n.ID, 16)
-		if len(shortID) > 12 {
-			shortID = shortID[:12]
-		}
-		scope := Truncate(n.Scope, 16)
+		scope := Truncate(n.Scope, 14)
+		st := classifyUsage(int64(n.Containers))
 
-		line := fmt.Sprintf(" %s  %-28s %-16s  %-16s  %-16s", "●", name, driver, shortID, scope)
+		line := fmt.Sprintf(" %s  %-34s %-9s  %-16s  %-14s", st.dot, name, st.label, driver, scope)
 		runes := []rune(line)
-		pad := colW - len(runes)
-		if pad > 0 {
-			line += strings.Repeat(" ", pad)
-			runes = []rune(line)
+		if pad := colW - len(runes); pad > 0 {
+			runes = append(runes, []rune(strings.Repeat(" ", pad))...)
 		} else if pad < 0 {
 			runes = runes[:max(colW, 3)]
-			line = string(runes)
 		}
 
 		bg := t.Background
@@ -2457,8 +2474,15 @@ func (m Model) renderNetworkList(w, vw, h int) (string, string) {
 			bg = lipgloss.Color("#2d4a2e")
 		}
 		bgStyle := lipgloss.NewStyle().Background(bg)
-		row := bgStyle.Render(" ") +
-			bgStyle.Foreground(t.Foreground).Render(string(runes[1:]))
+
+		// STATUS: the leading separator space and trailing pad stay on the row
+		// color; only the dot and the label carry the status color.
+		statusEnd := statusCol + len([]rune(st.label))
+		row := bgStyle.Render(seg(runes, 0, 1)) +
+			bgStyle.Copy().Foreground(st.color).Render(seg(runes, 1, 2)) +
+			bgStyle.Foreground(t.Foreground).Render(seg(runes, 2, statusCol)) +
+			bgStyle.Copy().Foreground(st.color).Render(seg(runes, statusCol, statusEnd)) +
+			bgStyle.Foreground(t.Foreground).Render(seg(runes, statusEnd, len(runes)))
 		rows = append(rows, row)
 	}
 	return header + "\n" + sep, lipgloss.JoinVertical(lipgloss.Top, rows...)

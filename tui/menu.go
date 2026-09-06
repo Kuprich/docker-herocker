@@ -325,7 +325,7 @@ func imageDisplayName(img docker.Image) string {
 // when at least one exists in the current list, separated by a divider because
 // it is a bulk action.
 func (m Model) volumeMenuItems(v docker.Volume) ([]menuItem, []int) {
-	st := classifyVolume(v.RefCount)
+	st := classifyUsage(v.RefCount)
 	name := v.Name
 
 	removeLabel := "Remove"
@@ -436,6 +436,99 @@ func (m Model) pruneVolumesCmd() tea.Cmd {
 	}
 	return func() tea.Msg {
 		if err := m.docker.PruneVolumes(); err != nil {
+			return errMsg{err}
+		}
+		time.Sleep(500 * time.Millisecond)
+		return m.refreshNow()()
+	}
+}
+
+// buildNetworkMenu builds the popup for the selected network, centered on the
+// screen like the other tab menus. The keyboard x opens it on the Networks
+// tab.
+func (m Model) buildNetworkMenu() popupMenu {
+	n := m.networks[m.selectedIdx]
+	items, dividers := m.networkMenuItems(n)
+	header := "Actions for network " + n.Name
+	w, h := menuMeasure(items, dividerCount(dividers), header)
+	return popupMenu{
+		items:    items,
+		dividers: dividers,
+		header:   header,
+		x:        max((m.width-w)/2, 0),
+		y:        max((m.height-h)/2, tabBarHeight+1),
+		w:        w,
+		h:        h,
+	}
+}
+
+// networkMenuItems builds the first-stage actions for a network. Remove is
+// always offered regardless of status — there is no force variant for
+// networks, so the daemon refuses an in-use network and that error surfaces in
+// the toast. "Prune unused" is shown only when the list holds at least one
+// network no container is attached to.
+func (m Model) networkMenuItems(n docker.Network) ([]menuItem, []int) {
+	items := []menuItem{
+		{
+			label:         "Remove",
+			key:           "d",
+			cli:           "docker network rm " + n.Name,
+			confirm:       true,
+			confirmHeader: "Remove " + n.Name + "?",
+			activate:      func() tea.Cmd { return m.networkRemoveCmd(n.Name) },
+		},
+	}
+	var dividers []int
+	if m.hasUnusedNetworks() {
+		dividers = append(dividers, len(items))
+		items = append(items, menuItem{
+			label:         "Prune unused",
+			key:           "p",
+			cli:           "docker network prune", // daemon-wide, no target
+			confirm:       true,
+			confirmHeader: "Prune all unused networks?",
+			activate:      m.pruneNetworksCmd,
+		})
+	}
+	return items, dividers
+}
+
+// hasUnusedNetworks reports whether the current list contains any network no
+// container is attached to (what `docker network prune` would remove). Gate
+// the "Prune unused" action on this so it never appears for a list that only
+// holds in-use networks.
+func (m Model) hasUnusedNetworks() bool {
+	for _, n := range m.networks {
+		if n.Containers <= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// networkRemoveCmd removes the selected network and refreshes the list,
+// mirroring volumeRemoveCmd.
+func (m Model) networkRemoveCmd(name string) tea.Cmd {
+	return func() tea.Msg {
+		if m.activeTab != tabNetworks {
+			return nil
+		}
+		if err := m.docker.RemoveNetwork(name); err != nil {
+			return errMsg{err}
+		}
+		time.Sleep(500 * time.Millisecond)
+		return m.refreshNow()()
+	}
+}
+
+// pruneNetworksCmd prunes every unused network the daemon still holds and
+// refreshes the list, mirroring pruneVolumesCmd.
+func (m Model) pruneNetworksCmd() tea.Cmd {
+	if m.docker == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		if err := m.docker.PruneNetworks(); err != nil {
 			return errMsg{err}
 		}
 		time.Sleep(500 * time.Millisecond)

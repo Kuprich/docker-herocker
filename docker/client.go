@@ -65,10 +65,11 @@ type Volume struct {
 }
 
 type Network struct {
-	ID     string
-	Name   string
-	Driver string
-	Scope  string
+	ID         string
+	Name       string
+	Driver     string
+	Scope      string
+	Containers int // containers attached to this network (including stopped); 0 means unused
 }
 
 type HealthInfo struct {
@@ -252,7 +253,36 @@ func (c *Client) ListNetworks() ([]Network, error) {
 			Scope:  n.Scope,
 		})
 	}
+	c.annotateNetworkUsage(out)
 	return out, nil
+}
+
+// annotateNetworkUsage fills each network's Containers count, crossing the
+// network list with the container list. The /networks endpoint never reports
+// attachments, but every container's summary carries the IDs of the networks
+// it is connected to, so usage (matching `docker network rm`'s notion of
+// "active endpoints", stopped containers included) is one extra list query
+// rather than an inspect per network.
+func (c *Client) annotateNetworkUsage(networks []Network) {
+	containerRes, err := c.cli.ContainerList(context.Background(), mclient.ContainerListOptions{All: true})
+	if err != nil {
+		return
+	}
+	used := make(map[string]int, len(containerRes.Items))
+	for i := range containerRes.Items {
+		s := &containerRes.Items[i]
+		if s.NetworkSettings == nil {
+			continue
+		}
+		for _, ep := range s.NetworkSettings.Networks {
+			if ep != nil {
+				used[ep.NetworkID]++
+			}
+		}
+	}
+	for i := range networks {
+		networks[i].Containers = used[networks[i].ID]
+	}
 }
 
 func stopTimeout(seconds int) *int {
@@ -279,6 +309,21 @@ func (c *Client) RemoveVolume(name string, force bool) error {
 // prune -a` semantics.
 func (c *Client) PruneVolumes() error {
 	_, err := c.cli.VolumePrune(context.Background(), mclient.VolumePruneOptions{All: true})
+	return err
+}
+
+// RemoveNetwork deletes a network. There is no force variant for networks:
+// the daemon refuses to remove one with active endpoints (attached
+// containers, stopped ones included), and that error is surfaced as-is.
+func (c *Client) RemoveNetwork(name string) error {
+	_, err := c.cli.NetworkRemove(context.Background(), name, mclient.NetworkRemoveOptions{})
+	return err
+}
+
+// PruneNetworks removes every unused network, mirroring `docker network
+// prune`: the daemon only deletes networks no container is attached to.
+func (c *Client) PruneNetworks() error {
+	_, err := c.cli.NetworkPrune(context.Background(), mclient.NetworkPruneOptions{})
 	return err
 }
 

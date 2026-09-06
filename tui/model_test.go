@@ -94,7 +94,7 @@ func TestClassifyImage(tt *testing.T) {
 }
 
 
-func TestClassifyVolume(tt *testing.T) {
+func TestClassifyUsage(tt *testing.T) {
 	cases := []struct {
 		name      string
 		refCount  int64
@@ -107,7 +107,7 @@ func TestClassifyVolume(tt *testing.T) {
 		{"unknown ref count treated as unused", -1, "UNUSED", "○"},
 	}
 	for _, c := range cases {
-		st := classifyVolume(c.refCount)
+		st := classifyUsage(c.refCount)
 		if st.label != c.wantLabel {
 			tt.Errorf("%s: label = %q, want %q", c.name, st.label, c.wantLabel)
 		}
@@ -115,10 +115,10 @@ func TestClassifyVolume(tt *testing.T) {
 			tt.Errorf("%s: dot = %q, want %q", c.name, st.dot, c.wantDot)
 		}
 	}
-	if got := classifyVolume(1).color; got != t.Success {
+	if got := classifyUsage(1).color; got != t.Success {
 		tt.Errorf("IN-USE color = %q, want success green", got)
 	}
-	if got := classifyVolume(0).color; got != t.Muted {
+	if got := classifyUsage(0).color; got != t.Muted {
 		tt.Errorf("UNUSED color = %q, want muted gray", got)
 	}
 }
@@ -2997,6 +2997,211 @@ func TestVolumeMenuConfirmFlow(tt *testing.T) {
 	next = testMouseUpdate(m2, enter)
 	if got := next.menu.header; got != "Force remove postgres_data?" {
 		tt.Errorf("in-use confirm header = %q", got)
+	}
+}
+
+func TestNetworkListRendersStatusLabels(tt *testing.T) {
+	// lipgloss downgrades to the Ascii profile when stdout is not a TTY;
+	// force TrueColor so the emitted SGR sequences assert the real palette.
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	tt.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+
+	m := New(nil)
+	m.width = 150
+	m.height = 30
+	m.ready = true
+	m.loading = false
+	m.networks = []docker.Network{
+		{Name: "bridge", Driver: "bridge", Scope: "local", Containers: 2},
+		{Name: "web_overlay", Driver: "overlay", Scope: "global", Containers: 0},
+		{Name: "unknown", Driver: "bridge", Scope: "local", Containers: -1},
+	}
+	m.fitMainViewport()
+
+	w, vw, h := innerW(m.width), innerW(m.width)-1, m.height-tabBarHeight-helpBarHeight
+	hdr, rows := m.renderNetworkList(w, vw, h)
+	if !strings.Contains(hdr, "STATUS") {
+		tt.Errorf("header lacks a STATUS column: %q", stripANSI(hdr))
+	}
+	if !strings.Contains(hdr, "DRIVER") {
+		tt.Errorf("header lacks a DRIVER column: %q", stripANSI(hdr))
+	}
+	if !strings.Contains(hdr, "SCOPE") {
+		tt.Errorf("header lacks a SCOPE column: %q", stripANSI(hdr))
+	}
+	if !strings.Contains(hdr, "NAME") {
+		tt.Errorf("header lacks a NAME column: %q", stripANSI(hdr))
+	}
+	// the network id exposes nothing actionable in a TUI and was dropped
+	if strings.Contains(hdr, "ID") {
+		tt.Errorf("header still lists a dropped ID column: %q", stripANSI(hdr))
+	}
+
+	lines := strings.Split(stripANSI(rows), "\n")
+	if len(lines) != len(m.networks) {
+		tt.Fatalf("got %d rows, want %d", len(lines), len(m.networks))
+	}
+
+	// Fixed offsets of the row format (" %s  %-34s %-9s  %-16s  %-14s").
+	const statusCol = 39 // STATUS label begins here
+	assertRow := func(i int, wantDot, wantLabel string) {
+		runes := []rune(lines[i])
+		if len(runes) < 2 {
+			tt.Fatalf("row %d too short: %q", i, lines[i])
+		}
+		if string(runes[1]) != wantDot {
+			tt.Errorf("row %d dot = %q, want %q", i, string(runes[1]), wantDot)
+		}
+		got := string(runes[statusCol : statusCol+len([]rune(wantLabel))])
+		if got != wantLabel {
+			tt.Errorf("row %d label at col %d = %q, want %q (line %q)", i, statusCol, got, wantLabel, lines[i])
+		}
+	}
+
+	assertRow(0, "●", "IN-USE")
+	assertRow(1, "○", "UNUSED")
+	assertRow(2, "○", "UNUSED")
+
+	// IN-USE renders with the success green, UNUSED with the muted gray.
+	if !strings.Contains(rows, "38;2;63;185;80") {
+		tt.Errorf("IN-USE status should be success green (63;185;80):\n%s", rows)
+	}
+	if !strings.Contains(rows, "38;2;139;147;158") {
+		tt.Errorf("UNUSED status should be muted gray (139;147;158):\n%s", rows)
+	}
+}
+
+func TestKeyXOpensNetworkMenu(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.networks = []docker.Network{
+		{Name: "bridge", Driver: "bridge", Scope: "local", Containers: 2},
+		{Name: "orphan_net", Driver: "bridge", Scope: "local", Containers: 0},
+	}
+	m.activeTab = tabNetworks
+	m.selectedIdx = 1
+	m.fitViewports()
+
+	x := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}
+	next, cmd := testUpdate(m, x)
+	if !next.menuOpen {
+		tt.Fatal("x should open the popup on the selected network")
+	}
+	if cmd != nil {
+		tt.Error("x must not dispatch an action")
+	}
+	if got := next.menu.header; got != "Actions for network orphan_net" {
+		tt.Errorf("menu title = %q", got)
+	}
+	if got := next.menu.items[0].label; got != "Remove" {
+		tt.Errorf("first item = %q, want Remove", got)
+	}
+	if want := max((next.width-next.menu.w)/2, 0); next.menu.x != want {
+		tt.Errorf("popup x = %d, want centered %d", next.menu.x, want)
+	}
+}
+
+func TestNetworkMenuAlwaysHasRemove(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.activeTab = tabNetworks
+	m.networks = []docker.Network{
+		{Name: "db_net", Driver: "bridge", Scope: "local", Containers: 3},
+		{Name: "orphan_net", Driver: "bridge", Scope: "local", Containers: 0},
+	}
+	m.fitViewports()
+
+	// Unlike images/volumes there is no force variant, so the action is a
+	// plain Remove for in-use networks too — the daemon refuses those and the
+	// error surfaces as the toast.
+	for _, c := range m.networks {
+		items, _ := m.networkMenuItems(c)
+		if got := items[0].label; got != "Remove" {
+			tt.Errorf("network %q item = %q, want Remove", c.Name, got)
+		}
+		if got := items[0].cli; got != "docker network rm "+c.Name {
+			tt.Errorf("network %q CLI = %q, want docker network rm %s", c.Name, got, c.Name)
+		}
+		if got := items[0].confirmHeader; got != "Remove "+c.Name+"?" {
+			tt.Errorf("network %q confirm header = %q", c.Name, got)
+		}
+		if !items[0].confirm {
+			tt.Errorf("network %q Remove must stage a confirm", c.Name)
+		}
+	}
+}
+
+func TestNetworkMenuPruneOnlyWithUnused(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.activeTab = tabNetworks
+
+	// all networks in use: only the single-network Remove is offered
+	m.networks = []docker.Network{
+		{Name: "db_net", Driver: "bridge", Containers: 1},
+		{Name: "cache_net", Driver: "bridge", Containers: 2},
+	}
+	m.fitViewports()
+	labelled, _ := m.networkMenuItems(m.networks[0])
+	if len(labelled) != 1 {
+		tt.Fatalf("menu without unused = %d items, want 1", len(labelled))
+	}
+
+	// one unused network unlocks the prune action
+	m.networks = append(m.networks, docker.Network{Name: "orphan_net", Driver: "bridge", Containers: 0})
+	m.fitViewports()
+	items, dividers := m.networkMenuItems(m.networks[0])
+	if len(items) != 2 {
+		tt.Fatalf("menu with unused = %d items, want 2", len(items))
+	}
+	if got := items[1].label; got != "Prune unused" {
+		tt.Errorf("second item = %q, want Prune unused", got)
+	}
+	if got := items[1].cli; got != "docker network prune" {
+		tt.Errorf("prune CLI = %q, want docker network prune", got)
+	}
+	if !items[1].confirm {
+		tt.Error("Prune unused must stage a confirm")
+	}
+	if got := items[1].confirmHeader; got != "Prune all unused networks?" {
+		tt.Errorf("prune confirm header = %q", got)
+	}
+	// the bulk action is visually separated from the single-network Remove
+	if len(dividers) != 1 || dividers[0] != 1 {
+		tt.Errorf("dividers = %v, want [1] (before the prune item)", dividers)
+	}
+}
+
+func TestNetworkMenuConfirmFlow(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.activeTab = tabNetworks
+	m.networks = []docker.Network{
+		{Name: "bridge", Driver: "bridge", Containers: 0},
+	}
+	m.selectedIdx = 0
+	m.fitViewports()
+
+	m = testMouseUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	enter := tea.KeyMsg{Type: tea.KeyEnter}
+	next := testMouseUpdate(m, enter)
+	if !next.menu.confirm {
+		tt.Fatal("Enter on Remove should stage the confirm stage")
+	}
+	if got := next.menu.items[0].label; got != "Yes, remove" {
+		tt.Errorf("confirm first item = %q, want Yes, remove", got)
+	}
+	if got := next.menu.header; got != "Remove bridge?" {
+		tt.Errorf("confirm header = %q", got)
 	}
 }
 
