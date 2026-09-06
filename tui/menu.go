@@ -246,6 +246,41 @@ func (m Model) buildPopupMenu(header string, items []menuItem, dividers []int) p
 	}
 }
 
+// removeItem is the single-resource destructive action every status-aware tab
+// menu shares: "Remove" for unused resources, "Force remove" (the docker CLI
+// gains a -f flag) when the daemon would reject the plain removal — images and
+// volumes. Networks are never forceable, so they call this with force=false.
+// The item stages a destructive confirm whose header names the target, and
+// activate carries the force decision into the removal command.
+func (m Model) removeItem(cmd, name string, force bool, activate func(bool) tea.Cmd) menuItem {
+	label := "Remove"
+	cli := cmd + " " + name
+	if force {
+		label = "Force remove"
+		cli = cmd + " -f " + name
+	}
+	return menuItem{
+		label:         label,
+		key:           "d",
+		cli:           cli,
+		confirm:       true,
+		confirmHeader: label + " " + name + "?",
+		activate:      func() tea.Cmd { return activate(force) },
+	}
+}
+
+// appendBulkAction appends the gated bulk action (prune) to a menu behind a
+// horizontal divider, or returns the items untouched when the list holds no
+// prune candidate. Image, volume and network menus all lay out this way.
+func appendBulkAction(items []menuItem, gate bool, bulk menuItem) ([]menuItem, []int) {
+	var dividers []int
+	if gate {
+		dividers = append(dividers, len(items))
+		items = append(items, bulk)
+	}
+	return items, dividers
+}
+
 // imageMenuItems builds the first-stage actions for an image, adapting to its
 // status: an image in use does not allow a plain removal (the daemon rejects
 // it), so it only offers "Force remove" (untag); unused and dangling images
@@ -253,13 +288,8 @@ func (m Model) buildPopupMenu(header string, items []menuItem, dividers []int) p
 // only when at least one exists in the current list, separated by a divider
 // because it is a bulk action.
 func (m Model) imageMenuItems(img docker.Image) ([]menuItem, []int) {
-	st := classifyImage(img.Containers, len(img.RepoTags))
+	inUse := classifyImage(img.Containers, len(img.RepoTags)).label == "IN-USE"
 	name := imageDisplayName(img)
-
-	removeLabel := "Remove"
-	if st.label == "IN-USE" {
-		removeLabel = "Force remove"
-	}
 
 	hasDangling := false
 	for _, im := range m.images {
@@ -269,34 +299,18 @@ func (m Model) imageMenuItems(img docker.Image) ([]menuItem, []int) {
 		}
 	}
 
-	removeCLI := "docker rmi " + name
-	if st.label == "IN-USE" {
-		removeCLI = "docker rmi -f " + name
-	}
-
 	items := []menuItem{
-		{
-			label:         removeLabel,
-			key:           "d",
-			cli:           removeCLI,
-			confirm:       true,
-			confirmHeader: removeLabel + " " + name + "?",
-			activate:      func() tea.Cmd { return m.imageRemoveCmd(img.ID, st.label == "IN-USE") },
-		},
+		m.removeItem("docker rmi", name, inUse, func(force bool) tea.Cmd { return m.imageRemoveCmd(img.ID, force) }),
 	}
-	var dividers []int
-	if hasDangling {
-		dividers = append(dividers, len(items))
-		items = append(items, menuItem{
-			label:         "Prune dangling",
-			key:           "p",
-			cli:           "docker image prune", // daemon-wide, no target
-			confirm:       true,
-			confirmHeader: "Prune all dangling images?",
-			activate:      m.pruneImagesCmd,
-		})
+	bulk := menuItem{
+		label:         "Prune dangling",
+		key:           "p",
+		cli:           "docker image prune", // daemon-wide, no target
+		confirm:       true,
+		confirmHeader: "Prune all dangling images?",
+		activate:      m.pruneImagesCmd,
 	}
-	return items, dividers
+	return appendBulkAction(items, hasDangling, bulk)
 }
 
 // imageDisplayName returns the first tag of an image, falling back to the
@@ -321,41 +335,20 @@ func imageDisplayName(img docker.Image) string {
 // when at least one exists in the current list, separated by a divider because
 // it is a bulk action.
 func (m Model) volumeMenuItems(v docker.Volume) ([]menuItem, []int) {
-	st := classifyUsage(v.RefCount)
-	name := v.Name
-
-	removeLabel := "Remove"
-	force := false
-	removeCLI := "docker volume rm " + name
-	if st.label == "IN-USE" {
-		removeLabel = "Force remove"
-		force = true
-		removeCLI = "docker volume rm -f " + name
-	}
+	inUse := classifyUsage(v.RefCount).label == "IN-USE"
 
 	items := []menuItem{
-		{
-			label:         removeLabel,
-			key:           "d",
-			cli:           removeCLI,
-			confirm:       true,
-			confirmHeader: removeLabel + " " + name + "?",
-			activate:      func() tea.Cmd { return m.volumeRemoveCmd(name, force) },
-		},
+		m.removeItem("docker volume rm", v.Name, inUse, func(force bool) tea.Cmd { return m.volumeRemoveCmd(v.Name, force) }),
 	}
-	var dividers []int
-	if m.hasUnusedVolumes() {
-		dividers = append(dividers, len(items))
-		items = append(items, menuItem{
-			label:         "Prune unused",
-			key:           "p",
-			cli:           "docker volume prune -a", // daemon-wide, no target
-			confirm:       true,
-			confirmHeader: "Prune all unused volumes?",
-			activate:      m.pruneVolumesCmd,
-		})
+	bulk := menuItem{
+		label:         "Prune unused",
+		key:           "p",
+		cli:           "docker volume prune -a", // daemon-wide, no target
+		confirm:       true,
+		confirmHeader: "Prune all unused volumes?",
+		activate:      m.pruneVolumesCmd,
 	}
-	return items, dividers
+	return appendBulkAction(items, m.hasUnusedVolumes(), bulk)
 }
 
 // hasUnusedVolumes reports whether the current list contains any volume with
@@ -446,28 +439,17 @@ func (m Model) pruneVolumesCmd() tea.Cmd {
 // network no container is attached to.
 func (m Model) networkMenuItems(n docker.Network) ([]menuItem, []int) {
 	items := []menuItem{
-		{
-			label:         "Remove",
-			key:           "d",
-			cli:           "docker network rm " + n.Name,
-			confirm:       true,
-			confirmHeader: "Remove " + n.Name + "?",
-			activate:      func() tea.Cmd { return m.networkRemoveCmd(n.Name) },
-		},
+		m.removeItem("docker network rm", n.Name, false, func(force bool) tea.Cmd { return m.networkRemoveCmd(n.Name) }),
 	}
-	var dividers []int
-	if m.hasUnusedNetworks() {
-		dividers = append(dividers, len(items))
-		items = append(items, menuItem{
-			label:         "Prune unused",
-			key:           "p",
-			cli:           "docker network prune", // daemon-wide, no target
-			confirm:       true,
-			confirmHeader: "Prune all unused networks?",
-			activate:      m.pruneNetworksCmd,
-		})
+	bulk := menuItem{
+		label:         "Prune unused",
+		key:           "p",
+		cli:           "docker network prune", // daemon-wide, no target
+		confirm:       true,
+		confirmHeader: "Prune all unused networks?",
+		activate:      m.pruneNetworksCmd,
 	}
-	return items, dividers
+	return appendBulkAction(items, m.hasUnusedNetworks(), bulk)
 }
 
 // hasUnusedNetworks reports whether the current list contains any network no
