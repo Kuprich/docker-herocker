@@ -2034,6 +2034,72 @@ func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
 	return m, nil
 }
 
+// selectedRowColor fills the selected list row, matching the container/panel
+// highlight used everywhere a row can be active.
+const selectedRowColor = "#2d4a2e"
+
+// renderTableFrame wraps a column header and pads it across the full panel
+// width, returning the bold accent header and the hairline separator below it.
+// Every tab table shares this layout.
+func renderTableFrame(w int, hdr string) (string, string) {
+	if pad := w - len([]rune(hdr)); pad > 0 {
+		hdr += strings.Repeat(" ", pad)
+	}
+	header := lipgloss.NewStyle().Background(t.Background).Foreground(t.Accent).Bold(true).Render(hdr)
+	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
+	return header, sep
+}
+
+// rowLine pads a raw row to the list column width, truncating instead when the
+// width shrinks, so every row fills exactly colW runes regardless of content
+// length.
+func rowLine(line string, colW int) []rune {
+	runes := []rune(line)
+	if pad := colW - len(runes); pad > 0 {
+		runes = append(runes, []rune(strings.Repeat(" ", pad))...)
+	} else if pad < 0 {
+		runes = runes[:max(colW, 3)]
+	}
+	return runes
+}
+
+// seg slices a rune buffer into its [from,to) characters, clamped to the
+// buffer so tiny terminals cannot panic; trailing segments are skipped.
+func seg(runes []rune, from, to int) string {
+	if from > len(runes) {
+		from = len(runes)
+	}
+	if to > len(runes) {
+		to = len(runes)
+	}
+	if from > to {
+		from = to
+	}
+	return string(runes[from:to])
+}
+
+// rowBG highlights the selected row; every other row keeps the panel
+// background.
+func (m Model) rowBG(i int) lipgloss.Color {
+	if i == m.selectedIdx {
+		return lipgloss.Color(selectedRowColor)
+	}
+	return t.Background
+}
+
+// statusRowHead renders the shared leading segments of a resource row: the
+// status-colored dot at the row start, the plain cell up to the pinned status
+// column, then the status-colored label itself — the background stays on the
+// row color throughout. Each tab pins statusCol with its own format string.
+func statusRowHead(bgStyle lipgloss.Style, runes []rune, dot, label string, color lipgloss.Color, statusCol int) (string, int) {
+	statusEnd := statusCol + len([]rune(label))
+	return bgStyle.Render(seg(runes, 0, 1)) +
+			bgStyle.Copy().Foreground(color).Render(seg(runes, 1, 2)) +
+			bgStyle.Foreground(t.Foreground).Render(seg(runes, 2, statusCol)) +
+			bgStyle.Copy().Foreground(color).Render(seg(runes, statusCol, statusEnd)),
+		statusEnd
+}
+
 func (m Model) renderContainerList(w, vw, h int) (string, string) {
 	colW := vw
 	if m.loading && len(m.containers) == 0 {
@@ -2043,11 +2109,7 @@ func (m Model) renderContainerList(w, vw, h int) (string, string) {
 		return "", MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No containers found"))
 	}
 	hdr := fmt.Sprintf("    %-29s %-11s  %7s    %-13s  %-20s  %-22s", "NAME", "STATE", "CPU %", "MEM", "IMAGE", "PORTS")
-	if pad := w - len([]rune(hdr)); pad > 0 {
-		hdr += strings.Repeat(" ", pad)
-	}
-	header := lipgloss.NewStyle().Background(t.Background).Foreground(t.Accent).Bold(true).Render(hdr)
-	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
+	header, sep := renderTableFrame(w, hdr)
 
 	var rows []string
 	for i, c := range m.containers {
@@ -2070,34 +2132,9 @@ func (m Model) renderContainerList(w, vw, h int) (string, string) {
 		}
 		dotColor := stateColor(c.State)
 
-		line := fmt.Sprintf(" %s  %-29s %-11s  %7s   %13s   %-20s  %-22s", dot, name, state, cpu, mem, img, ports)
-		runes := []rune(line)
-		padding := colW - len(runes)
-		if padding > 0 {
-			line = line + strings.Repeat(" ", padding)
-			runes = []rune(line)
-		} else if padding < 0 {
-			runes = runes[:max(colW, 3)]
-		}
+		runes := rowLine(fmt.Sprintf(" %s  %-29s %-11s  %7s   %13s   %-20s  %-22s", dot, name, state, cpu, mem, img, ports), colW)
 
-		seg := func(from, to int) string {
-			if from > len(runes) {
-				from = len(runes)
-			}
-			if to > len(runes) {
-				to = len(runes)
-			}
-			if from > to {
-				from = to
-			}
-			return string(runes[from:to])
-		}
-
-		bg := t.Background
-		if i == m.selectedIdx {
-			bg = lipgloss.Color("#2d4a2e")
-		}
-		bgStyle := lipgloss.NewStyle().Background(bg)
+		bgStyle := lipgloss.NewStyle().Background(m.rowBG(i))
 
 		// Ports: use the protocol-colored cell (which fills the remaining
 		// width with its own background); fall back to the plain segment
@@ -2107,10 +2144,10 @@ func (m Model) renderContainerList(w, vw, h int) (string, string) {
 			avail = 0
 		}
 		var portsRow string
-		if cell, ok := renderPortsCell(c.Ports, avail, bg); ok {
+		if cell, ok := renderPortsCell(c.Ports, avail, m.rowBG(i)); ok {
 			portsRow = cell
 		} else {
-			portsRow = bgStyle.Render(seg(portsCol, len(runes)))
+			portsRow = bgStyle.Render(seg(runes, portsCol, len(runes)))
 		}
 
 		// MEM column: a fixed 13-rune cell right-aligned at imageCol. When the
@@ -2120,24 +2157,24 @@ func (m Model) renderContainerList(w, vw, h int) (string, string) {
 		// regardless of how long "usage" or "limit" happen to be.
 		memLen := len([]rune(mem))
 		memStart := memCol + 13 - memLen
-		memCell := bgStyle.Foreground(t.Foreground).Render(seg(memCol, memStart))
+		memCell := bgStyle.Foreground(t.Foreground).Render(seg(runes, memCol, memStart))
 
 		if slash := strings.IndexRune(mem, '/'); slash >= 0 {
 			usageLen := len([]rune(mem[:slash]))
 			usageEnd := memStart + usageLen
-			memCell += bgStyle.Copy().Foreground(memUsageColor).Render(seg(memStart, usageEnd))
-			memCell += bgStyle.Foreground(t.Foreground).Render(seg(usageEnd, imageCol))
+			memCell += bgStyle.Copy().Foreground(memUsageColor).Render(seg(runes, memStart, usageEnd))
+			memCell += bgStyle.Foreground(t.Foreground).Render(seg(runes, usageEnd, imageCol))
 		} else {
-			memCell += bgStyle.Foreground(t.Foreground).Render(seg(memStart, imageCol))
+			memCell += bgStyle.Foreground(t.Foreground).Render(seg(runes, memStart, imageCol))
 		}
 
 		row := bgStyle.Render(" ") +
-			bgStyle.Copy().Foreground(dotColor).Render(seg(1, 2)) +
-			bgStyle.Foreground(t.Foreground).Render(seg(2, stateCol)) +
-			bgStyle.Copy().Foreground(stateColor(c.State)).Render(seg(stateCol, cpuCol)) +
-			bgStyle.Foreground(t.Foreground).Render(seg(cpuCol, memCol)) +
+			bgStyle.Copy().Foreground(dotColor).Render(seg(runes, 1, 2)) +
+			bgStyle.Foreground(t.Foreground).Render(seg(runes, 2, stateCol)) +
+			bgStyle.Copy().Foreground(stateColor(c.State)).Render(seg(runes, stateCol, cpuCol)) +
+			bgStyle.Foreground(t.Foreground).Render(seg(runes, cpuCol, memCol)) +
 			memCell +
-			bgStyle.Foreground(t.Foreground).Render(seg(imageCol, portsCol)) +
+			bgStyle.Foreground(t.Foreground).Render(seg(runes, imageCol, portsCol)) +
 			portsRow
 		rows = append(rows, row)
 	}
@@ -2154,12 +2191,7 @@ func (m Model) renderImageList(w, vw, h int) (string, string) {
 	}
 
 	hdr := fmt.Sprintf("    %-42s %-9s   %-12s  %-9s    %-19s", "REPOSITORY:TAG", "STATUS", "CREATED", "SIZE", "IMAGE ID")
-	padding := w - len([]rune(hdr))
-	if padding > 0 {
-		hdr += strings.Repeat(" ", padding)
-	}
-	header := lipgloss.NewStyle().Background(t.Background).Foreground(t.Accent).Bold(true).Render(hdr)
-	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
+	header, sep := renderTableFrame(w, hdr)
 
 	// Fixed rune offsets of the row produced by the format string
 	// (" %s  %-42s %-9s   %-12s %9s     %-19s"): the dot column is [0..4),
@@ -2175,18 +2207,6 @@ func (m Model) renderImageList(w, vw, h int) (string, string) {
 		idPrefixLen = 7   // len("sha256:")
 		idHexLen    = 12  // hex payload width
 	)
-	seg := func(runes []rune, from, to int) string {
-		if from > len(runes) {
-			from = len(runes)
-		}
-		if to > len(runes) {
-			to = len(runes)
-		}
-		if from > to {
-			from = to
-		}
-		return string(runes[from:to])
-	}
 
 	var rows []string
 	for i := range m.images {
@@ -2210,30 +2230,19 @@ func (m Model) renderImageList(w, vw, h int) (string, string) {
 
 		st := classifyImage(img.Containers, len(img.RepoTags))
 
-		line := fmt.Sprintf(" %s  %-42s %-9s   %-12s %9s     %-19s", st.dot, repoTag, st.label, created, size, id)
-		runes := []rune(line)
-		if pad := colW - len(runes); pad > 0 {
-			runes = append(runes, []rune(strings.Repeat(" ", pad))...)
-		} else if pad < 0 {
-			runes = runes[:max(colW, 3)]
-		}
+		runes := rowLine(fmt.Sprintf(" %s  %-42s %-9s   %-12s %9s     %-19s", st.dot, repoTag, st.label, created, size, id), colW)
 
-		bg := t.Background
-		if i == m.selectedIdx {
-			bg = lipgloss.Color("#2d4a2e")
-		}
-		bgStyle := lipgloss.NewStyle().Background(bg)
+		bgStyle := lipgloss.NewStyle().Background(m.rowBG(i))
 
 		// STATUS: the leading separator space and trailing pad stay on the row
-		// color; only the label itself carries the status color.
-		statusEnd := statusCol + len([]rune(st.label))
-		row := bgStyle.Render(seg(runes, 0, 1)) +
-			bgStyle.Copy().Foreground(st.color).Render(seg(runes, 1, 2)) +
-			bgStyle.Foreground(t.Foreground).Render(seg(runes, 2, statusCol)) +
-			bgStyle.Copy().Foreground(st.color).Render(seg(runes, statusCol, statusEnd)) +
+		// color; only the label itself carries the status color. The SIZE unit
+		// is muted (sizeUnitColor) and the "sha256:" id prefix is washed out.
+		sizeNumEnd := sizeCol + sizeW - len([]rune(size)) + len([]rune(sizeNum))
+		head, statusEnd := statusRowHead(bgStyle, runes, st.dot, st.label, st.color, statusCol)
+		row := head +
 			bgStyle.Foreground(t.Foreground).Render(seg(runes, statusEnd, sizeCol)) +
-			bgStyle.Foreground(t.Foreground).Render(seg(runes, sizeCol, sizeCol+sizeW-len([]rune(size))+len([]rune(sizeNum)))) +
-			bgStyle.Copy().Foreground(sizeUnitColor(sizeUnit)).Render(seg(runes, sizeCol+sizeW-len([]rune(size))+len([]rune(sizeNum)), sizeCol+sizeW)) +
+			bgStyle.Foreground(t.Foreground).Render(seg(runes, sizeCol, sizeNumEnd)) +
+			bgStyle.Copy().Foreground(sizeUnitColor(sizeUnit)).Render(seg(runes, sizeNumEnd, sizeCol+sizeW)) +
 			bgStyle.Foreground(t.Foreground).Render(seg(runes, sizeCol+sizeW, idCol)) +
 			bgStyle.Copy().Foreground(t.Muted).Render(seg(runes, idCol, idCol+idPrefixLen)) +
 			bgStyle.Foreground(t.Foreground).Render(seg(runes, idCol+idPrefixLen, idCol+idPrefixLen+idHexLen)) +
@@ -2336,12 +2345,7 @@ func (m Model) renderVolumeList(w, vw, h int) (string, string) {
 	}
 
 	hdr := fmt.Sprintf("    %-64s %-9s  %10s   %-12s", "NAME", "STATUS", "SIZE", "CREATED")
-	padding := w - len([]rune(hdr))
-	if padding > 0 {
-		hdr += strings.Repeat(" ", padding)
-	}
-	header := lipgloss.NewStyle().Background(t.Background).Foreground(t.Accent).Bold(true).Render(hdr)
-	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
+	header, sep := renderTableFrame(w, hdr)
 
 	// Fixed rune offsets of the row produced by the format string
 	// (" %s  %-64s %-9s  %10s   %-12s"): the dot column is [0..4), then
@@ -2355,18 +2359,6 @@ func (m Model) renderVolumeList(w, vw, h int) (string, string) {
 		createdCol = 93 // CREATED begins here
 		createdW   = 12 // CREATED column width
 	)
-	seg := func(runes []rune, from, to int) string {
-		if from > len(runes) {
-			from = len(runes)
-		}
-		if to > len(runes) {
-			to = len(runes)
-		}
-		if from > to {
-			from = to
-		}
-		return string(runes[from:to])
-	}
 
 	var rows []string
 	for i := range m.volumes {
@@ -2388,30 +2380,19 @@ func (m Model) renderVolumeList(w, vw, h int) (string, string) {
 
 		st := classifyUsage(v.RefCount)
 
-		line := fmt.Sprintf(" %s  %-64s %-9s  %10s   %-12s", st.dot, name, st.label, size, created)
-		runes := []rune(line)
-		if pad := colW - len(runes); pad > 0 {
-			runes = append(runes, []rune(strings.Repeat(" ", pad))...)
-		} else if pad < 0 {
-			runes = runes[:max(colW, 3)]
-		}
+		runes := rowLine(fmt.Sprintf(" %s  %-64s %-9s  %10s   %-12s", st.dot, name, st.label, size, created), colW)
 
-		bg := t.Background
-		if i == m.selectedIdx {
-			bg = lipgloss.Color("#2d4a2e")
-		}
-		bgStyle := lipgloss.NewStyle().Background(bg)
+		bgStyle := lipgloss.NewStyle().Background(m.rowBG(i))
 
 		// STATUS: the leading separator space and trailing pad stay on the row
-		// color; only the dot and the label carry the status color.
-		statusEnd := statusCol + len([]rune(st.label))
-		row := bgStyle.Render(seg(runes, 0, 1)) +
-			bgStyle.Copy().Foreground(st.color).Render(seg(runes, 1, 2)) +
-			bgStyle.Foreground(t.Foreground).Render(seg(runes, 2, statusCol)) +
-			bgStyle.Copy().Foreground(st.color).Render(seg(runes, statusCol, statusEnd)) +
+		// color; only the dot and the label carry the status color. The SIZE
+		// unit is muted (sizeUnitColor) and the rest of the row is plain.
+		sizeNumEnd := sizeCol + sizeW - len([]rune(size)) + len([]rune(sizeNum))
+		head, statusEnd := statusRowHead(bgStyle, runes, st.dot, st.label, st.color, statusCol)
+		row := head +
 			bgStyle.Foreground(t.Foreground).Render(seg(runes, statusEnd, sizeCol)) +
-			bgStyle.Foreground(t.Foreground).Render(seg(runes, sizeCol, sizeCol+sizeW-len([]rune(size))+len([]rune(sizeNum)))) +
-			bgStyle.Copy().Foreground(sizeUnitColor(sizeUnit)).Render(seg(runes, sizeCol+sizeW-len([]rune(size))+len([]rune(sizeNum)), sizeCol+sizeW)) +
+			bgStyle.Foreground(t.Foreground).Render(seg(runes, sizeCol, sizeNumEnd)) +
+			bgStyle.Copy().Foreground(sizeUnitColor(sizeUnit)).Render(seg(runes, sizeNumEnd, sizeCol+sizeW)) +
 			bgStyle.Foreground(t.Foreground).Render(seg(runes, sizeCol+sizeW, len(runes)))
 		rows = append(rows, row)
 	}
@@ -2428,30 +2409,13 @@ func (m Model) renderNetworkList(w, vw, h int) (string, string) {
 	}
 
 	hdr := fmt.Sprintf("    %-34s %-9s  %-16s  %-14s", "NAME", "STATUS", "DRIVER", "SCOPE")
-	padding := w - len([]rune(hdr))
-	if padding > 0 {
-		hdr += strings.Repeat(" ", padding)
-	}
-	header := lipgloss.NewStyle().Background(t.Background).Foreground(t.Accent).Bold(true).Render(hdr)
-	sep := lipgloss.NewStyle().Background(t.Background).Foreground(t.Border).Render(strings.Repeat("─", w))
+	header, sep := renderTableFrame(w, hdr)
 
 	// Fixed rune offsets of the row produced by the format string
 	// (" %s  %-34s %-9s  %-16s  %-14s"): the dot column is [0..4), then
 	// NAME / STATUS / DRIVER / SCOPE (the full network id is dropped —
 	// usage status matters more in a TUI than the untruncated id).
 	const statusCol = 39 // STATUS label begins here
-	seg := func(runes []rune, from, to int) string {
-		if from > len(runes) {
-			from = len(runes)
-		}
-		if to > len(runes) {
-			to = len(runes)
-		}
-		if from > to {
-			from = to
-		}
-		return string(runes[from:to])
-	}
 
 	var rows []string
 	for i := range m.networks {
@@ -2461,28 +2425,14 @@ func (m Model) renderNetworkList(w, vw, h int) (string, string) {
 		scope := Truncate(n.Scope, 14)
 		st := classifyUsage(int64(n.Containers))
 
-		line := fmt.Sprintf(" %s  %-34s %-9s  %-16s  %-14s", st.dot, name, st.label, driver, scope)
-		runes := []rune(line)
-		if pad := colW - len(runes); pad > 0 {
-			runes = append(runes, []rune(strings.Repeat(" ", pad))...)
-		} else if pad < 0 {
-			runes = runes[:max(colW, 3)]
-		}
+		runes := rowLine(fmt.Sprintf(" %s  %-34s %-9s  %-16s  %-14s", st.dot, name, st.label, driver, scope), colW)
 
-		bg := t.Background
-		if i == m.selectedIdx {
-			bg = lipgloss.Color("#2d4a2e")
-		}
-		bgStyle := lipgloss.NewStyle().Background(bg)
+		bgStyle := lipgloss.NewStyle().Background(m.rowBG(i))
 
 		// STATUS: the leading separator space and trailing pad stay on the row
 		// color; only the dot and the label carry the status color.
-		statusEnd := statusCol + len([]rune(st.label))
-		row := bgStyle.Render(seg(runes, 0, 1)) +
-			bgStyle.Copy().Foreground(st.color).Render(seg(runes, 1, 2)) +
-			bgStyle.Foreground(t.Foreground).Render(seg(runes, 2, statusCol)) +
-			bgStyle.Copy().Foreground(st.color).Render(seg(runes, statusCol, statusEnd)) +
-			bgStyle.Foreground(t.Foreground).Render(seg(runes, statusEnd, len(runes)))
+		head, statusEnd := statusRowHead(bgStyle, runes, st.dot, st.label, st.color, statusCol)
+		row := head + bgStyle.Foreground(t.Foreground).Render(seg(runes, statusEnd, len(runes)))
 		rows = append(rows, row)
 	}
 	return header + "\n" + sep, lipgloss.JoinVertical(lipgloss.Top, rows...)
