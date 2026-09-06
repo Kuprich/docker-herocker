@@ -231,6 +231,25 @@ func (m Model) buildImageMenu() popupMenu {
 	}
 }
 
+// buildVolumeMenu builds the popup for the selected volume, centered on the
+// screen like the container and image menus. The keyboard x opens it on the
+// Volumes tab.
+func (m Model) buildVolumeMenu() popupMenu {
+	v := m.volumes[m.selectedIdx]
+	items, dividers := m.volumeMenuItems(v)
+	header := "Actions for volume " + v.Name
+	w, h := menuMeasure(items, dividerCount(dividers), header)
+	return popupMenu{
+		items:    items,
+		dividers: dividers,
+		header:   header,
+		x:        max((m.width-w)/2, 0),
+		y:        max((m.height-h)/2, tabBarHeight+1),
+		w:        w,
+		h:        h,
+	}
+}
+
 // imageMenuItems builds the first-stage actions for an image, adapting to its
 // status: an image in use does not allow a plain removal (the daemon rejects
 // it), so it only offers "Force remove" (untag); unused and dangling images
@@ -299,6 +318,63 @@ func imageDisplayName(img docker.Image) string {
 	return img.ID
 }
 
+// volumeMenuItems builds the first-stage actions for a volume, adapting to its
+// status like the image menu does: an in-use volume cannot be removed plainly
+// (the daemon rejects it), so it only offers "Force remove"; unused volumes
+// offer "Remove". "Prune unused" cleans every UNUSED volume and is shown only
+// when at least one exists in the current list, separated by a divider because
+// it is a bulk action.
+func (m Model) volumeMenuItems(v docker.Volume) ([]menuItem, []int) {
+	st := classifyVolume(v.RefCount)
+	name := v.Name
+
+	removeLabel := "Remove"
+	force := false
+	removeCLI := "docker volume rm " + name
+	if st.label == "IN-USE" {
+		removeLabel = "Force remove"
+		force = true
+		removeCLI = "docker volume rm -f " + name
+	}
+
+	items := []menuItem{
+		{
+			label:         removeLabel,
+			key:           "d",
+			cli:           removeCLI,
+			confirm:       true,
+			confirmHeader: removeLabel + " " + name + "?",
+			activate:      func() tea.Cmd { return m.volumeRemoveCmd(name, force) },
+		},
+	}
+	var dividers []int
+	if m.hasUnusedVolumes() {
+		dividers = append(dividers, len(items))
+		items = append(items, menuItem{
+			label:         "Prune unused",
+			key:           "p",
+			cli:           "docker volume prune -a", // daemon-wide, no target
+			confirm:       true,
+			confirmHeader: "Prune all unused volumes?",
+			activate:      m.pruneVolumesCmd,
+		})
+	}
+	return items, dividers
+}
+
+// hasUnusedVolumes reports whether the current list contains any volume with
+// no container reference (what `docker volume prune -a` would remove). Gate
+// the "Prune unused" action on this so it never appears for a list that only
+// holds in-use volumes.
+func (m Model) hasUnusedVolumes() bool {
+	for _, v := range m.volumes {
+		if v.RefCount <= 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // imageRemoveCmd / pruneImagesCmd act on the selected image (or all dangling
 // images) and refresh the list, mirroring removeContainerCmd.
 func (m Model) imageRemoveCmd(id string, force bool) tea.Cmd {
@@ -330,6 +406,36 @@ func (m Model) pruneContainers() tea.Cmd {
 	}
 	return func() tea.Msg {
 		if err := m.docker.PruneContainers(); err != nil {
+			return errMsg{err}
+		}
+		time.Sleep(500 * time.Millisecond)
+		return m.refreshNow()()
+	}
+}
+
+// volumeRemoveCmd removes the selected volume (with force for an in-use one)
+// and refreshes the list, mirroring imageRemoveCmd.
+func (m Model) volumeRemoveCmd(name string, force bool) tea.Cmd {
+	return func() tea.Msg {
+		if m.activeTab != tabVolumes {
+			return nil
+		}
+		if err := m.docker.RemoveVolume(name, force); err != nil {
+			return errMsg{err}
+		}
+		time.Sleep(500 * time.Millisecond)
+		return m.refreshNow()()
+	}
+}
+
+// pruneVolumesCmd prunes every unused volume the daemon still holds and
+// refreshes the list, mirroring pruneImagesCmd.
+func (m Model) pruneVolumesCmd() tea.Cmd {
+	if m.docker == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		if err := m.docker.PruneVolumes(); err != nil {
 			return errMsg{err}
 		}
 		time.Sleep(500 * time.Millisecond)

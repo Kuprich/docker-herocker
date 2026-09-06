@@ -2848,6 +2848,158 @@ func TestImageMenuConfirmFlow(tt *testing.T) {
 	}
 }
 
+func TestKeyXOpensVolumeMenu(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.volumes = []docker.Volume{
+		{Name: "postgres_data", RefCount: 2, Size: 1 << 30},
+		{Name: "orphan", RefCount: 0, Size: 1 << 20},
+	}
+	m.activeTab = tabVolumes
+	m.selectedIdx = 1
+	m.fitViewports()
+
+	x := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}
+	next, cmd := testUpdate(m, x)
+	if !next.menuOpen {
+		tt.Fatal("x should open the popup on the selected volume")
+	}
+	if cmd != nil {
+		tt.Error("x must not dispatch an action")
+	}
+	if got := next.menu.header; got != "Actions for volume orphan" {
+		tt.Errorf("menu title = %q", got)
+	}
+	if got := next.menu.items[0].label; got != "Remove" {
+		tt.Errorf("first item = %q, want Remove for an unused volume", got)
+	}
+	if want := max((next.width-next.menu.w)/2, 0); next.menu.x != want {
+		tt.Errorf("popup x = %d, want centered %d", next.menu.x, want)
+	}
+}
+
+func TestVolumeMenuVariesByStatus(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.activeTab = tabVolumes
+
+	// IN-USE volumes cannot be removed plainly: only "Force remove" is offered.
+	m.volumes = []docker.Volume{{Name: "postgres_data", RefCount: 2, Size: 1 << 30}}
+	m.fitViewports()
+	items, _ := m.volumeMenuItems(m.volumes[0])
+	if got := items[0].label; got != "Force remove" {
+		tt.Errorf("in-use item = %q, want Force remove", got)
+	}
+	if got := items[0].cli; got != "docker volume rm -f postgres_data" {
+		tt.Errorf("in-use CLI = %q, want docker volume rm -f postgres_data", got)
+	}
+	if got := items[0].confirmHeader; got != "Force remove postgres_data?" {
+		tt.Errorf("in-use confirm header = %q", got)
+	}
+
+	// UNUSED volumes offer a plain Remove.
+	m.volumes = []docker.Volume{{Name: "orphan", RefCount: 0, Size: 1 << 20}}
+	m.fitViewports()
+	items, _ = m.volumeMenuItems(m.volumes[0])
+	if got := items[0].label; got != "Remove" {
+		tt.Errorf("unused item = %q, want Remove", got)
+	}
+	if got := items[0].cli; got != "docker volume rm orphan" {
+		tt.Errorf("unused CLI = %q, want docker volume rm orphan", got)
+	}
+}
+
+func TestVolumeMenuPruneOnlyWithUnused(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.activeTab = tabVolumes
+
+	// all volumes in use: only the single-volume Remove is offered
+	m.volumes = []docker.Volume{
+		{Name: "db", RefCount: 1, Size: 1 << 30},
+		{Name: "cache", RefCount: 2, Size: 1 << 20},
+	}
+	m.fitViewports()
+	labelled, _ := m.volumeMenuItems(m.volumes[0])
+	if len(labelled) != 1 {
+		tt.Fatalf("menu without unused = %d items, want 1", len(labelled))
+	}
+
+	// one unused volume unlocks the prune action
+	m.volumes = append(m.volumes, docker.Volume{Name: "orphan", RefCount: 0})
+	m.fitViewports()
+	items, dividers := m.volumeMenuItems(m.volumes[0])
+	if len(items) != 2 {
+		tt.Fatalf("menu with unused = %d items, want 2", len(items))
+	}
+	if got := items[1].label; got != "Prune unused" {
+		tt.Errorf("second item = %q, want Prune unused", got)
+	}
+	if got := items[1].cli; got != "docker volume prune -a" {
+		tt.Errorf("prune CLI = %q, want docker volume prune -a", got)
+	}
+	if !items[1].confirm {
+		tt.Error("Prune unused must stage a confirm")
+	}
+	if got := items[1].confirmHeader; got != "Prune all unused volumes?" {
+		tt.Errorf("prune confirm header = %q", got)
+	}
+	// the bulk action is visually separated from the single-volume Remove
+	if len(dividers) != 1 || dividers[0] != 1 {
+		tt.Errorf("dividers = %v, want [1] (before the prune item)", dividers)
+	}
+}
+
+func TestVolumeMenuConfirmFlow(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.activeTab = tabVolumes
+	m.volumes = []docker.Volume{
+		{Name: "postgres_data", RefCount: 2},
+		{Name: "orphan", RefCount: 0},
+	}
+	m.selectedIdx = 1
+	m.fitViewports()
+
+	m = testMouseUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	enter := tea.KeyMsg{Type: tea.KeyEnter}
+
+	// unused volume: plain removal confirm
+	next := testMouseUpdate(m, enter)
+	if !next.menu.confirm {
+		tt.Fatal("Enter on Remove should stage the confirm stage")
+	}
+	if got := next.menu.items[0].label; got != "Yes, remove" {
+		tt.Errorf("confirm first item = %q, want Yes, remove", got)
+	}
+	if got := next.menu.header; got != "Remove orphan?" {
+		tt.Errorf("confirm header = %q", got)
+	}
+
+	// in-use volume: force-remove confirm
+	m2 := New(nil)
+	m2.width = 120
+	m2.height = 30
+	m2.ready = true
+	m2.activeTab = tabVolumes
+	m2.volumes = []docker.Volume{{Name: "postgres_data", RefCount: 2}}
+	m2.selectedIdx = 0
+	m2.fitViewports()
+	m2 = testMouseUpdate(m2, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	next = testMouseUpdate(m2, enter)
+	if got := next.menu.header; got != "Force remove postgres_data?" {
+		tt.Errorf("in-use confirm header = %q", got)
+	}
+}
+
 func TestMenuPauseResume(tt *testing.T) {
 	enter := tea.KeyMsg{Type: tea.KeyEnter}
 	down := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}

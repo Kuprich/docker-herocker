@@ -1902,8 +1902,8 @@ func cellAt(content string, r int) (int, int) {
 	return 0, 0
 }
 
-// openContextMenu raises the container/image context menu for the currently
-// selected row, centered on the screen (keyboard x).
+// openContextMenu raises the container/image/volume context menu for the
+// currently selected row, centered on the screen (keyboard x).
 func (m *Model) openContextMenu() {
 	switch m.activeTab {
 	case tabContainers:
@@ -1916,6 +1916,11 @@ func (m *Model) openContextMenu() {
 			return
 		}
 		m.menu = m.buildImageMenu()
+	case tabVolumes:
+		if m.selectedIdx < 0 || m.selectedIdx >= len(m.volumes) {
+			return
+		}
+		m.menu = m.buildVolumeMenu()
 	default:
 		return
 	}

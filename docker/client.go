@@ -265,6 +265,23 @@ func (c *Client) RemoveImage(id string, force bool) error {
 	return err
 }
 
+// RemoveVolume deletes a volume; force ignores an in-use volume (instantly
+// disconnects it from the container referencing it), mirroring
+// `docker volume rm [-f]`.
+func (c *Client) RemoveVolume(name string, force bool) error {
+	_, err := c.cli.VolumeRemove(context.Background(), name, mclient.VolumeRemoveOptions{Force: force})
+	return err
+}
+
+// PruneVolumes removes every unused volume, named and anonymous alike — the
+// daemon's notion of "unused" matches what this app marks UNUSED (no
+// container references it), so All is required for docker-compatible `volume
+// prune -a` semantics.
+func (c *Client) PruneVolumes() error {
+	_, err := c.cli.VolumePrune(context.Background(), mclient.VolumePruneOptions{All: true})
+	return err
+}
+
 // PruneImages deletes all dangling images (no longer referenced by any tag).
 func (c *Client) PruneImages() error {
 	filters := mclient.Filters{}.Add("dangling", "true")

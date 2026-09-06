@@ -517,6 +517,32 @@ def three_key_shows_volume_statuses(s):
 
 
 @check
+def volume_context_menu(s):
+    s.drain(3.0)
+
+    # the 3 key opens the Volumes tab; x then raises the volume menu for the
+    # selected row with the rm CLI hint right-aligned
+    s.send(b"3"); time.sleep(0.05)
+    s.drain(0.9)
+    mark = len(s.allbuf)
+    s.send(b"x"); time.sleep(0.05)
+    s.drain(0.8)
+    tail = s.allbuf[mark:].decode("utf-8", "replace")
+    assert re.search(r"│[^\n]*?Actions for volume", tail), \
+        "x on Volumes did not open a centered volume menu"
+    assert "docker volume rm" in tail, "volume menu lacks the rm CLI hint"
+
+    # Esc closes; a forced repaint must carry no menu labels
+    s.send(b"\x1b"); time.sleep(0.05)
+    mark = len(s.allbuf)
+    s.send(b"\x1b[<65;60;20M"); time.sleep(0.05)  # wheel -> repaint
+    s.drain(0.8)
+    tail = s.allbuf[mark:].decode("utf-8", "replace")
+    assert "Actions for volume" not in tail, "volume menu title survived Esc"
+    assert "Prune all unused volumes?" not in tail, "volume confirm header survived Esc"
+
+
+@check
 def narrow_terminal_no_panic(s):
     # reuse current session with a resize instead of a second spawn
     winsize = struct.pack("HHHH", 20, 100, 0, 0)
