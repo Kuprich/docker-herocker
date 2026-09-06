@@ -200,17 +200,7 @@ func containerDisplayName(c docker.Container) string {
 func (m Model) buildContainerMenu() popupMenu {
 	c := m.containers[m.selectedIdx]
 	items, dividers := m.containerMenuItems(c)
-	header := "Actions for container " + containerDisplayName(c)
-	w, h := menuMeasure(items, dividerCount(dividers), header)
-	return popupMenu{
-		items:    items,
-		dividers: dividers,
-		header:   header,
-		x:        max((m.width-w)/2, 0),
-		y:        max((m.height-h)/2, tabBarHeight+1),
-		w:        w,
-		h:        h,
-	}
+	return m.buildPopupMenu("Actions for container "+containerDisplayName(c), items, dividers)
 }
 
 // buildImageMenu builds the popup for the selected image, centered on the
@@ -218,17 +208,7 @@ func (m Model) buildContainerMenu() popupMenu {
 func (m Model) buildImageMenu() popupMenu {
 	img := m.images[m.selectedIdx]
 	items, dividers := m.imageMenuItems(img)
-	header := "Actions for image " + imageDisplayName(img)
-	w, h := menuMeasure(items, dividerCount(dividers), header)
-	return popupMenu{
-		items:    items,
-		dividers: dividers,
-		header:   header,
-		x:        max((m.width-w)/2, 0),
-		y:        max((m.height-h)/2, tabBarHeight+1),
-		w:        w,
-		h:        h,
-	}
+	return m.buildPopupMenu("Actions for image "+imageDisplayName(img), items, dividers)
 }
 
 // buildVolumeMenu builds the popup for the selected volume, centered on the
@@ -237,7 +217,23 @@ func (m Model) buildImageMenu() popupMenu {
 func (m Model) buildVolumeMenu() popupMenu {
 	v := m.volumes[m.selectedIdx]
 	items, dividers := m.volumeMenuItems(v)
-	header := "Actions for volume " + v.Name
+	return m.buildPopupMenu("Actions for volume "+v.Name, items, dividers)
+}
+
+// buildNetworkMenu builds the popup for the selected network, centered on the
+// screen like the other tab menus. The keyboard x opens it on the Networks
+// tab.
+func (m Model) buildNetworkMenu() popupMenu {
+	n := m.networks[m.selectedIdx]
+	items, dividers := m.networkMenuItems(n)
+	return m.buildPopupMenu("Actions for network "+n.Name, items, dividers)
+}
+
+// buildPopupMenu packages a header, the item list and their divider layout
+// into a centered popup box, clamped into the terminal and kept clear of the
+// tab bar. Every tab menu goes through here so sizing and placement stay the
+// same across containers, images, volumes and networks.
+func (m Model) buildPopupMenu(header string, items []menuItem, dividers []int) popupMenu {
 	w, h := menuMeasure(items, dividerCount(dividers), header)
 	return popupMenu{
 		items:    items,
@@ -440,25 +436,6 @@ func (m Model) pruneVolumesCmd() tea.Cmd {
 		}
 		time.Sleep(500 * time.Millisecond)
 		return m.refreshNow()()
-	}
-}
-
-// buildNetworkMenu builds the popup for the selected network, centered on the
-// screen like the other tab menus. The keyboard x opens it on the Networks
-// tab.
-func (m Model) buildNetworkMenu() popupMenu {
-	n := m.networks[m.selectedIdx]
-	items, dividers := m.networkMenuItems(n)
-	header := "Actions for network " + n.Name
-	w, h := menuMeasure(items, dividerCount(dividers), header)
-	return popupMenu{
-		items:    items,
-		dividers: dividers,
-		header:   header,
-		x:        max((m.width-w)/2, 0),
-		y:        max((m.height-h)/2, tabBarHeight+1),
-		w:        w,
-		h:        h,
 	}
 }
 
