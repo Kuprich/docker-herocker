@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/creack/pty"
 	"github.com/kuri4/dockerherocker/docker"
 	"github.com/mattn/go-runewidth"
 )
@@ -167,12 +168,14 @@ type Model struct {
 	containerLogLastTS   time.Time
 	details              *docker.ContainerDetails
 	detailsID            string
-	detailViewport       viewport.Model
-	detailSel            textSel
-	detailDragSel        bool
-	dragGen              uint64 // bumped on every drag start/release; guards stale timers
-	detailContent        string // plain (ANSI-stripped) Info body, selection buffer geometry
-	detailStyled         string // styled Info body, re-decorated per render when selected
+
+	term           *termFloat // floating docker exec/attach panel, nil while closed
+	detailViewport viewport.Model
+	detailSel      textSel
+	detailDragSel  bool
+	dragGen        uint64 // bumped on every drag start/release; guards stale timers
+	detailContent  string // plain (ANSI-stripped) Info body, selection buffer geometry
+	detailStyled   string // styled Info body, re-decorated per render when selected
 
 	copyToast    bool   // shows the "Copied to clipboard" badge in the tab bar
 	copyToastGen uint64 // bumped per copy; guards stale copyToastTimer ticks
@@ -278,9 +281,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 		m.detailViewport.Style = BaseStyle
 		m.fitViewports()
+		if m.term != nil {
+			m.term.x, m.term.y, m.term.w, m.term.h = m.termPanelLayout()
+			m.term.clampBody()
+			if m.term.ptmx != nil {
+				_ = pty.Setsize(m.term.ptmx, &pty.Winsize{
+					Rows: uint16(max(m.term.h-4, 1)),
+					Cols: uint16(max(m.term.w-2, 1)),
+				})
+			}
+		}
 		m.ready = true
 
 	case tea.KeyMsg:
+		// While the floating terminal is open every keystroke belongs to the
+		// container shell - forward it into the pty and swallow it entirely.
+		if m.term != nil {
+			return m.forwardToTerm(msg)
+		}
 		// Context menu steals the keys it understands; anything else closes
 		// it. Quit is intentionally not handled so ctrl+c/q still exits.
 		if m.menuOpen {
@@ -401,6 +419,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.NextTab):
 			m.switchTabRelative(+1)
 			return m, tea.Batch(m.refreshNow(), m.loadContainerDetails())
+		case key.Matches(msg, keys.Exec):
+			return m, m.execShell()
+		case key.Matches(msg, keys.Attach):
+			return m, m.attachContainer()
 		}
 
 	case refreshTickMsg:
@@ -510,6 +532,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.scrollToSelected()
 		return m, nil
 
+	case termStartMsg:
+		// A previous session may still be shaking down (fresh docker exec is
+		// replacing a stale one); tear it down first so the panel is single
+		// and the new master owns the reader.
+		m.closeTerminal()
+		m.term = &termFloat{ptmx: msg.ptmx, cmd: msg.cmd, args: msg.args}
+		m.term.x, m.term.y, m.term.w, m.term.h = m.termPanelLayout()
+		m.term.clampBody()
+		return m, m.termReader()
+
+	case termOutputMsg:
+		if m.term == nil {
+			return m, nil
+		}
+		m.term.append(msg)
+		return m, m.termReader()
+
+	case termExitMsg:
+		if m.term != nil && !termExitedSilently(msg.err) {
+			m.err = msg.err
+		}
+		m.closeTerminal()
+		return m, m.refreshNow()
+
 	case containerLogMsg:
 		// Drop fetches for a container we are no longer viewing (races
 		// between selection changes and in-flight requests).
@@ -591,6 +637,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Let the terminal perform its own native text selection
 			// (Shift+drag). Some emulators still forward the drag events to
 			// the app, so ignore them instead of jumping/clicking mid-select.
+			return m, nil
+		}
+
+		// Floating terminal: clicks land on it, except the × badge in the
+		// header row which closes the session.
+		if m.term != nil {
+			if msg.Type == tea.MouseLeft && msg.Action != tea.MouseActionMotion {
+				sx, sy := msg.X-1, msg.Y-1
+				if sy == m.term.y+1 && sx >= m.term.x+m.term.w-4 && sx <= m.term.x+m.term.w-2 {
+					m.closeTerminal()
+					return m, m.refreshNow()
+				}
+			}
 			return m, nil
 		}
 
@@ -755,6 +814,9 @@ func (m Model) View() string {
 	}
 	if m.menuOpen {
 		content = m.splicePopup(content)
+	}
+	if m.term != nil {
+		content = m.spliceTerminal(content)
 	}
 	return content
 }

@@ -22,6 +22,8 @@ type keyMap struct {
 	NextTab   key.Binding
 	SubTab    key.Binding
 	Select    key.Binding
+	Exec      key.Binding
+	Attach    key.Binding
 }
 
 var keys = keyMap{
@@ -98,6 +100,14 @@ var keys = keyMap{
 		key.WithKeys(""),
 		key.WithHelp("Shift+drag", "native text selection"),
 	),
+	Exec: key.NewBinding(
+		key.WithKeys("e"),
+		key.WithHelp("e", "exec shell"),
+	),
+	Attach: key.NewBinding(
+		key.WithKeys("t"),
+		key.WithHelp("t", "attach"),
+	),
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
@@ -107,7 +117,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Menu, k.Follow, k.Copy, k.Select},
-		{k.StartStop, k.Restart, k.ToggleAll},
+		{k.StartStop, k.Restart, k.ToggleAll, k.Exec, k.Attach},
 		{k.Back, k.Help, k.Quit},
 	}
 }

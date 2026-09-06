@@ -82,6 +82,8 @@ func (m Model) containerMenuItems(c docker.Container) ([]menuItem, []int) {
 		items = append(items,
 			menuItem{label: "Stop", key: "s", cli: "docker stop " + name, activate: m.toggleContainer},
 			menuItem{label: "Pause", key: "p", cli: "docker pause " + name, activate: m.pauseContainer},
+			menuItem{label: "Exec shell", key: "e", cli: "docker exec -it " + name + " sh", activate: m.execShell},
+			menuItem{label: "Attach", key: "t", cli: "docker attach --sig-proxy=false " + name, activate: m.attachContainer},
 		)
 	case "paused":
 		items = append(items,

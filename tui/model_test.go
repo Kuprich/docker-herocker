@@ -3,17 +3,21 @@ package tui
 import (
 	"encoding/base64"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/creack/pty"
 	"github.com/kuri4/dockerherocker/docker"
 	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
+	"golang.org/x/sys/unix"
 )
 
 // stripANSI removes SGR escape sequences so assertions can inspect visible
@@ -2249,37 +2253,43 @@ func TestRenderContainerMenuShape(tt *testing.T) {
 	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[2]), "│")); strings.ReplaceAll(got, "─", "") != "" {
 		tt.Errorf("separator row = %q, want a full-width ─ rule", got)
 	}
-	// running container -> 5 items: Stop, Pause, Restart, Remove(submenu),
-	// plus the bulk Prune stopped separated by a rule
+	// running container -> 7 items: Stop, Pause, Exec shell, Attach,
+	// Restart, Remove(submenu), plus the bulk Prune stopped separated by a rule
 	if got := strings.Fields(strings.Trim(strings.Trim(stripANSI(rows[3]), "│"), " "))[:2]; len(got) != 2 || got[0] != "s" || got[1] != "Stop" {
 		tt.Errorf("first item = %q, want a s Stop row for a running container", strings.TrimSpace(strings.Trim(stripANSI(rows[3]), "│")))
 	}
 	if got := strings.Fields(strings.Trim(strings.Trim(stripANSI(rows[4]), "│"), " "))[:2]; len(got) != 2 || got[0] != "p" || got[1] != "Pause" {
 		tt.Errorf("second item = %q, want a p Pause row for a running container", strings.TrimSpace(strings.Trim(stripANSI(rows[4]), "│")))
 	}
-	if got := strings.Fields(strings.Trim(strings.Trim(stripANSI(rows[5]), "│"), " "))[:2]; len(got) != 2 || got[0] != "r" || got[1] != "Restart" {
-		tt.Errorf("third item = %q, want a r Restart row", strings.TrimSpace(strings.Trim(stripANSI(rows[5]), "│")))
+	if got := strings.Fields(strings.Trim(strings.Trim(stripANSI(rows[5]), "│"), " "))[:2]; len(got) != 2 || got[0] != "e" || got[1] != "Exec" {
+		tt.Errorf("third item = %q, want an e Exec shell row for a running container", strings.TrimSpace(strings.Trim(stripANSI(rows[5]), "│")))
 	}
-	if got := strings.Trim(strings.Trim(stripANSI(rows[6]), "│"), " "); !strings.HasPrefix(got, "d Remove ›") {
-		tt.Errorf("fourth item = %q, want a d Remove submenu row", got)
+	if got := strings.Fields(strings.Trim(strings.Trim(stripANSI(rows[6]), "│"), " "))[:2]; len(got) != 2 || got[0] != "t" || got[1] != "Attach" {
+		tt.Errorf("fourth item = %q, want a t Attach row for a running container", strings.TrimSpace(strings.Trim(stripANSI(rows[6]), "│")))
+	}
+	if got := strings.Fields(strings.Trim(strings.Trim(stripANSI(rows[7]), "│"), " "))[:2]; len(got) != 2 || got[0] != "r" || got[1] != "Restart" {
+		tt.Errorf("fifth item = %q, want a r Restart row", strings.TrimSpace(strings.Trim(stripANSI(rows[7]), "│")))
+	}
+	if got := strings.Trim(strings.Trim(stripANSI(rows[8]), "│"), " "); !strings.HasPrefix(got, "d Remove ›") {
+		tt.Errorf("sixth item = %q, want a d Remove submenu row", got)
 	}
 	// a horizontal rule separates the single-container actions from the bulk
 	// "Prune stopped" action below (a stopped container exists in the list)
-	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[7]), "│")); strings.ReplaceAll(got, "─", "") != "" {
+	if got := strings.TrimSpace(strings.Trim(stripANSI(rows[9]), "│")); strings.ReplaceAll(got, "─", "") != "" {
 		tt.Errorf("divider row = %q, want a full-width ─ rule", got)
 	}
-	if got := strings.Trim(strings.Trim(stripANSI(rows[8]), "│"), " "); !strings.HasPrefix(got, "g Prune stopped") {
-		tt.Errorf("fifth item = %q, want a g Prune stopped row", strings.TrimSpace(strings.Trim(stripANSI(rows[8]), "│")))
+	if got := strings.Trim(strings.Trim(stripANSI(rows[10]), "│"), " "); !strings.HasPrefix(got, "g Prune stopped") {
+		tt.Errorf("seventh item = %q, want a g Prune stopped row", strings.TrimSpace(strings.Trim(stripANSI(rows[10]), "│")))
 	}
-	if len(rows) != 10 {
-		tt.Errorf("menu rows = %d, want 10 (5 items + divider + header + borders)", len(rows))
+	if len(rows) != 12 {
+		tt.Errorf("menu rows = %d, want 12 (7 items + divider + header + borders)", len(rows))
 	}
 
 	// the docker CLI hint column is right-aligned: every hint ends at the same
 	// display column, flush against the right border of the menu. The "Remove ›"
 	// submenu row carries no hint, so it is skipped.
 	cliEnd := -1
-	for _, r := range rows[3:9] {
+	for _, r := range rows[3:11] {
 		text := strings.Trim(stripANSI(r), "│")
 		idx := strings.LastIndex(text, "docker")
 		if idx < 0 {
@@ -2433,8 +2443,24 @@ func TestMenuNavigationAndEsc(tt *testing.T) {
 		tt.Errorf("down = %d, want 4", next.menu.sel)
 	}
 	next = testMouseUpdate(next, down)
+	if next.menu.sel != 5 {
+		tt.Errorf("down = %d, want 5", next.menu.sel)
+	}
+	next = testMouseUpdate(next, down)
+	if next.menu.sel != 6 {
+		tt.Errorf("down = %d, want 6", next.menu.sel)
+	}
+	next = testMouseUpdate(next, down)
+	if next.menu.sel != 6 {
+		tt.Errorf("down past the last item = %d, want 6 (clamped)", next.menu.sel)
+	}
+	next = testMouseUpdate(next, up)
+	if next.menu.sel != 5 {
+		tt.Errorf("up = %d, want 5", next.menu.sel)
+	}
+	next = testMouseUpdate(next, up)
 	if next.menu.sel != 4 {
-		tt.Errorf("down past the last item = %d, want 4 (clamped)", next.menu.sel)
+		tt.Errorf("up = %d, want 4", next.menu.sel)
 	}
 	next = testMouseUpdate(next, up)
 	if next.menu.sel != 3 {
@@ -2507,7 +2533,7 @@ func TestMenuClickOutsideCloses(tt *testing.T) {
 	// left-click on the Remove item (running: title + separator + Stop + Pause
 	// above it, plus the top border) opens the Remove submenu and keeps the
 	// popup open in the first stage
-	itemY := m.menu.y + 6 + 1 // 0-based row -> 1-based mouse Y
+	itemY := m.menu.y + 8 + 1 // 0-based row -> 1-based mouse Y
 	itemX := m.menu.x + 3 + 1
 	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: itemX, Y: itemY})
 	if !next.menuOpen {
@@ -2530,8 +2556,8 @@ func TestMenuClickOutsideCloses(tt *testing.T) {
 	if !next.menuOpen {
 		tt.Fatal("Esc in the submenu should return to the root, not close")
 	}
-	if len(next.menu.items) != 5 {
-		tt.Fatalf("back to root should restore %d items, got %d", 5, len(next.menu.items))
+	if len(next.menu.items) != 7 {
+		tt.Fatalf("back to root should restore %d items, got %d", 7, len(next.menu.items))
 	}
 
 	// left-click clearly outside the box (right and below) closes the popup;
@@ -3214,7 +3240,7 @@ func TestMenuPauseResume(tt *testing.T) {
 	m.containers = makeTestContainers(3)
 	m.fitViewports()
 	open := openMenuFor(m, 0)
-	for i, want := range []string{"Stop", "Pause", "Restart", "Remove"} {
+	for i, want := range []string{"Stop", "Pause", "Exec shell", "Attach", "Restart", "Remove"} {
 		if got := open.menu.items[i].label; got != want {
 			tt.Errorf("running item %d = %q, want %q", i, got, want)
 		}
@@ -3503,5 +3529,285 @@ func TestParseSGRState(tt *testing.T) {
 	}
 	if got := sgrRestore("38;2;48;54;60", ""); got != "\x1b[38;2;48;54;60m" {
 		tt.Errorf("sgrRestore fg only = %q", got)
+	}
+}
+
+// ----- floating terminal (docker exec / attach) -----
+
+func TestTermFloatLineDiscipline(tt *testing.T) {
+	t := &termFloat{}
+	t.append([]byte("hello\r\n"))
+	if len(t.body) != 1 || t.body[0] != "hello" {
+		tt.Fatalf("CRLF line = %q, want [hello]", t.body)
+	}
+	t.append([]byte("a\x1b[31mb\x1b[0mc\n"))
+	if got := t.body[len(t.body)-1]; got != "abc" {
+		tt.Errorf("ANSI-stripped line = %q, want abc", got)
+	}
+	t.append([]byte("x\x1b]0;title\x07y\n"))
+	if got := t.body[len(t.body)-1]; got != "xy" {
+		tt.Errorf("OSC-stripped line = %q, want xy", got)
+	}
+	t.append([]byte("tab\tstop\n"))
+	if got := t.body[len(t.body)-1]; got != "tab    stop" {
+		tt.Errorf("tab line = %q, want 4-space expansion", got)
+	}
+	t.append([]byte("abcd\x7f\n"))
+	if got := t.body[len(t.body)-1]; got != "abc" {
+		tt.Errorf("backspace line = %q, want abc", got)
+	}
+	t.append([]byte("Го\xd0\xb4\x7f!\n"))
+	if got := t.body[len(t.body)-1]; got != "Го!" {
+		tt.Errorf("multibyte backspace line = %q, want Го!", got)
+	}
+	// body is clamped to the box height
+	t.h = 6
+	t.append([]byte("1\n2\n3\n4\n5\n6\n"))
+	if len(t.body) != t.h-4 {
+		tt.Errorf("clamped body rows = %d, want %d", len(t.body), t.h-4)
+	}
+	if got := t.body[len(t.body)-1]; got != "6" {
+		tt.Errorf("clamped tail = %q, want 6", got)
+	}
+}
+
+func TestTermRenderPanelAndSplice(tt *testing.T) {
+	m := detailTestModel()
+	term := &termFloat{args: []string{"exec", "-it", "web", "sh"}}
+	term.x, term.y, term.w, term.h = m.termPanelLayout()
+	term.h = 6
+	term.append([]byte("root@abc:/#\n"))
+	m.term = term
+
+	rows := m.renderTerminalPanel()
+	if len(rows) != term.h {
+		tt.Errorf("panel rows = %d, want %d", len(rows), term.h)
+	}
+	for _, r := range rows {
+		if lipgloss.Width(r) != term.w {
+			tt.Errorf("panel row width = %d, want %d: %q", lipgloss.Width(r), term.w, stripANSI(r))
+		}
+	}
+	header := stripANSI(rows[1])
+	if !strings.Contains(header, "docker exec -it web sh") {
+		tt.Errorf("header = %q, want the docker invocation", header)
+	}
+	if !strings.Contains(header, "×") {
+		tt.Error("header must carry the close badge ×")
+	}
+	body := stripANSI(strings.Join(rows[3:], "\n"))
+	if !strings.Contains(body, "root@abc:/#") {
+		tt.Errorf("body = %q, want the shell prompt", body)
+	}
+
+	// the panel splices into the frame and every covered row keeps frame width
+	frameLines := strings.Split(m.View(), "\n")
+	if len(frameLines) != m.height {
+		tt.Fatalf("frame rows = %d, want %d", len(frameLines), m.height)
+	}
+	for r := 0; r < term.h; r++ {
+		row := frameLines[term.y+r]
+		if lipgloss.Width(row) != m.width {
+			tt.Errorf("frame row %d width = %d, want %d", term.y+r, lipgloss.Width(row), m.width)
+		}
+	}
+	// the header text is visible within the spliced frame
+	if !strings.Contains(stripANSI(frameLines[term.y+1]), "docker exec -it web sh") {
+		tt.Errorf("spliced header row = %q", stripANSI(frameLines[term.y+1]))
+	}
+}
+
+func TestTermForwardAndStream(tt *testing.T) {
+	ptmx, slave, err := pty.Open()
+	if err != nil {
+		tt.Fatalf("pty.Open: %v", err)
+	}
+	defer ptmx.Close()
+	defer slave.Close()
+	// The docker CLI would put the slave into raw mode; do the same here so
+	// reads return per-key instead of waiting for a canonical newline.
+	rawSlave(slave)
+
+	m := detailTestModel()
+	term := &termFloat{ptmx: ptmx, args: []string{"exec", "-it", "web", "sh"}}
+	term.x, term.y, term.w, term.h = m.termPanelLayout()
+	m.term = term
+
+	readSlave := func() string {
+		got := make(chan string, 1)
+		go func() {
+			buf := make([]byte, 16)
+			n, _ := slave.Read(buf)
+			got <- string(buf[:n])
+		}()
+		select {
+		case s := <-got:
+			return s
+		case <-time.After(time.Second):
+			return ""
+		}
+	}
+
+	// 'e' reaches the guest's stdin verbatim
+	testUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	if s := readSlave(); s != "e" {
+		tt.Errorf("forward of 'e' reached guest as %q, want e", s)
+	}
+
+	// every key is swallowed while the float is open - q included - but the
+	// byte still travels to the pty
+	next, cmd := testUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if cmd != nil {
+		tt.Errorf("forwarded keystroke must not dispatch app commands, got %T", cmd)
+	}
+	if next.term == nil {
+		tt.Fatal("forwarding must not close the float")
+	}
+	if s := readSlave(); s != "q" {
+		tt.Errorf("forward of 'q' reached guest as %q, want q", s)
+	}
+
+	// special keys map to the terminal byte sequences a shell expects
+	for _, c := range []struct {
+		key  tea.KeyMsg
+		want []byte
+	}{
+		{tea.KeyMsg{Type: tea.KeyBackspace}, []byte{0x7f}},
+		{tea.KeyMsg{Type: tea.KeyEnter}, []byte{'\r'}},
+		{tea.KeyMsg{Type: tea.KeyTab}, []byte{'\t'}},
+		{tea.KeyMsg{Type: tea.KeyEsc}, []byte{'\x1b'}},
+		{tea.KeyMsg{Type: tea.KeyUp}, []byte("\x1b[A")},
+		{tea.KeyMsg{Type: tea.KeyCtrlC}, []byte{3}},
+	} {
+		testUpdate(next, c.key)
+		if s := readSlave(); s != string(c.want) {
+			tt.Errorf("%s => guest got %q, want %q", c.key.String(), s, string(c.want))
+		}
+	}
+
+	// output streamed into the model lands in the body and re-issues the reader
+	next, cmd = testUpdate(next, termOutputMsg([]byte("hello\n")))
+	if len(next.term.body) == 0 || next.term.body[len(next.term.body)-1] != "hello" {
+		tt.Errorf("term output body = %q, want hello", next.term.body)
+	}
+	if cmd == nil {
+		tt.Error("termOutputMsg must re-issue the reader command")
+	}
+
+	// a normal exit (EIO once the guest halves are gone) closes the float
+	slave.Close()
+	next, cmd = testUpdate(next, termExitMsg{err: syscall.EIO})
+	if next.term != nil {
+		tt.Error("termExitMsg must close the float")
+	}
+	if cmd == nil {
+		tt.Error("termExitMsg must refresh the lists")
+	}
+}
+
+// rawSlave switches a pty slave into raw mode so reads return single bytes
+// immediately (canonical ICANON mode would buffer until a newline).
+func rawSlave(f *os.File) {
+	ti, err := unix.IoctlGetTermios(int(f.Fd()), unix.TCGETS)
+	if err != nil {
+		panic(err)
+	}
+	ti.Iflag &^= unix.ICRNL | unix.IXON
+	ti.Lflag &^= unix.ICANON | unix.ECHO | unix.ISIG
+	if err := unix.IoctlSetTermios(int(f.Fd()), unix.TCSETS, ti); err != nil {
+		panic(err)
+	}
+}
+
+func TestTermStartReplacesSession(tt *testing.T) {
+	ptmx1, slave1, err := pty.Open()
+	if err != nil {
+		tt.Fatalf("pty.Open #1: %v", err)
+	}
+	defer ptmx1.Close()
+	defer slave1.Close()
+	ptmx2, slave2, err := pty.Open()
+	if err != nil {
+		tt.Fatalf("pty.Open #2: %v", err)
+	}
+	defer ptmx2.Close()
+	defer slave2.Close()
+
+	m := detailTestModel()
+	m.term = &termFloat{ptmx: ptmx1}
+	next, cmd := testUpdate(m, termStartMsg{ptmx: ptmx2, args: []string{"attach", "--sig-proxy=false", "web"}})
+	if next.term == nil || next.term.ptmx != ptmx2 {
+		tt.Fatal("termStartMsg must install the new session on the new master")
+	}
+	if got := next.term.title(); got != "docker attach --sig-proxy=false web" {
+		tt.Errorf("title = %q, want docker attach --sig-proxy=false web", got)
+	}
+	if cmd == nil {
+		tt.Error("termStartMsg must start the reader")
+	}
+}
+
+func TestMenuExecAttachItems(tt *testing.T) {
+	items, _ := detailTestModel().containerMenuItems(makeTestContainers(1)[0])
+	labels := make([]string, len(items))
+	for i, it := range items {
+		labels[i] = it.label
+	}
+	want := []string{"Stop", "Pause", "Exec shell", "Attach", "Restart", "Remove"}
+	for i, w := range want {
+		if i >= len(labels) || labels[i] != w {
+			tt.Errorf("running menu %v, want %v", labels, want)
+			break
+		}
+	}
+	var execCLI, attachCLI string
+	for _, it := range items {
+		switch it.label {
+		case "Exec shell":
+			execCLI = it.cli
+		case "Attach":
+			attachCLI = it.cli
+		}
+	}
+	if execCLI != "docker exec -it test-container-0 sh" {
+		tt.Errorf("exec cli = %q", execCLI)
+	}
+	if attachCLI != "docker attach --sig-proxy=false test-container-0" {
+		tt.Errorf("attach cli = %q", attachCLI)
+	}
+}
+
+func TestExecAttachGating(tt *testing.T) {
+	m := detailTestModel()
+	m.containers = makeTestContainers(3)
+	m.selectedIdx = 0 // running
+	if m.execShell() == nil {
+		tt.Error("exec on a running container must dispatch")
+	}
+	if m.attachContainer() == nil {
+		tt.Error("attach on a running container must dispatch")
+	}
+	m.selectedIdx = 1 // exited
+	if m.execShell() != nil {
+		tt.Error("exec must be gated on a running container")
+	}
+	if m.attachContainer() != nil {
+		tt.Error("attach must be gated on a running container")
+	}
+	m.selectedIdx = 0
+	m.activeTab = tabImages
+	if m.execShell() != nil {
+		tt.Error("exec must be gated on the containers tab")
+	}
+	if m.attachContainer() != nil {
+		tt.Error("attach must be gated on the containers tab")
+	}
+
+	// hotkeys: e/t on the containers tab start a session for a running pick
+	m = detailTestModel()
+	m.selectedIdx = 0
+	m, _ = testUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	if m.term != nil {
+		tt.Fatal("pressing e must not open the float synchronously (cmd starts it)")
 	}
 }
