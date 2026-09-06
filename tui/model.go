@@ -2722,75 +2722,58 @@ func (m Model) statsCmd(containers []docker.Container) tea.Cmd {
 	}
 }
 
-func (m Model) toggleContainer() tea.Cmd {
+// selectedContainer returns the container under the cursor, or ok=false when
+// the containers tab does not own the selection. Every per-container action
+// pre-checks through here before touching the list.
+func (m Model) selectedContainer() (docker.Container, bool) {
 	if m.activeTab != tabContainers || m.selectedIdx >= len(m.containers) {
+		return docker.Container{}, false
+	}
+	return m.containers[m.selectedIdx], true
+}
+
+func (m Model) toggleContainer() tea.Cmd {
+	c, ok := m.selectedContainer()
+	if !ok {
 		return nil
 	}
-	c := m.containers[m.selectedIdx]
-	return func() tea.Msg {
-		var err error
+	return m.runDockerOp(nil, func() error {
 		switch c.State {
 		case "running":
-			err = m.docker.StopContainer(c.ID)
+			return m.docker.StopContainer(c.ID)
 		case "paused":
-			err = m.docker.UnpauseContainer(c.ID)
+			return m.docker.UnpauseContainer(c.ID)
 		default:
-			err = m.docker.StartContainer(c.ID)
+			return m.docker.StartContainer(c.ID)
 		}
-		if err != nil {
-			return errMsg{err}
-		}
-		time.Sleep(500 * time.Millisecond)
-		return m.refreshNow()()
-	}
+	})
 }
 
 // pauseContainer suspends the running processes of the selected container
 // without stopping the container itself.
 func (m Model) pauseContainer() tea.Cmd {
-	if m.activeTab != tabContainers || m.selectedIdx >= len(m.containers) {
+	c, ok := m.selectedContainer()
+	if !ok {
 		return nil
 	}
-	c := m.containers[m.selectedIdx]
-	return func() tea.Msg {
-		err := m.docker.PauseContainer(c.ID)
-		if err != nil {
-			return errMsg{err}
-		}
-		time.Sleep(500 * time.Millisecond)
-		return m.refreshNow()()
-	}
+	return m.runDockerOp(nil, func() error { return m.docker.PauseContainer(c.ID) })
 }
 
 // resumeContainer resumes the process execution within a paused container.
 func (m Model) resumeContainer() tea.Cmd {
-	if m.activeTab != tabContainers || m.selectedIdx >= len(m.containers) {
+	c, ok := m.selectedContainer()
+	if !ok {
 		return nil
 	}
-	c := m.containers[m.selectedIdx]
-	return func() tea.Msg {
-		err := m.docker.UnpauseContainer(c.ID)
-		if err != nil {
-			return errMsg{err}
-		}
-		time.Sleep(500 * time.Millisecond)
-		return m.refreshNow()()
-	}
+	return m.runDockerOp(nil, func() error { return m.docker.UnpauseContainer(c.ID) })
 }
 
 func (m Model) restartContainer() tea.Cmd {
-	if m.activeTab != tabContainers || m.selectedIdx >= len(m.containers) {
+	c, ok := m.selectedContainer()
+	if !ok {
 		return nil
 	}
-	c := m.containers[m.selectedIdx]
-	return func() tea.Msg {
-		err := m.docker.RestartContainer(c.ID)
-		if err != nil {
-			return errMsg{err}
-		}
-		time.Sleep(500 * time.Millisecond)
-		return m.refreshNow()()
-	}
+	return m.runDockerOp(nil, func() error { return m.docker.RestartContainer(c.ID) })
 }
 
 // logTail is how many last lines the Logs pane fetches.

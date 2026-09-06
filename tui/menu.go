@@ -157,6 +157,25 @@ func (m *Model) enterConfirmStage(header string, yes func() tea.Cmd) {
 	m.menu.y = max((m.height-m.menu.h)/2, tabBarHeight+1)
 }
 
+// runDockerOp wraps a docker operation into the standard settle-then-refresh
+// cycle every menu action uses: failures surface through the toast, a short
+// settle delay lets the daemon propagate the change, then the lists refresh.
+// guard, when non-nil, is evaluated up front — a false result means the
+// command is stale (e.g. the tab switched away) and the whole action is
+// dropped, mirroring the pre-checks the callbacks used to inline.
+func (m Model) runDockerOp(guard func() bool, op func() error) tea.Cmd {
+	if guard != nil && !guard() {
+		return nil
+	}
+	return func() tea.Msg {
+		if err := op(); err != nil {
+			return errMsg{err}
+		}
+		time.Sleep(500 * time.Millisecond)
+		return m.refreshNow()()
+	}
+}
+
 // removeContainer / removeContainerVolumes remove the selected container
 // (with its volumes) and refresh the list, mirroring toggleContainer and
 // restartContainer.
@@ -164,23 +183,16 @@ func (m Model) removeContainer() tea.Cmd        { return m.removeContainerCmd(fa
 func (m Model) removeContainerVolumes() tea.Cmd { return m.removeContainerCmd(true) }
 
 func (m Model) removeContainerCmd(volumes bool) tea.Cmd {
-	if m.activeTab != tabContainers || m.selectedIdx >= len(m.containers) {
+	c, ok := m.selectedContainer()
+	if !ok {
 		return nil
 	}
-	c := m.containers[m.selectedIdx]
-	return func() tea.Msg {
-		var err error
+	return m.runDockerOp(nil, func() error {
 		if volumes {
-			err = m.docker.RemoveContainerVolumes(c.ID)
-		} else {
-			err = m.docker.RemoveContainer(c.ID)
+			return m.docker.RemoveContainerVolumes(c.ID)
 		}
-		if err != nil {
-			return errMsg{err}
-		}
-		time.Sleep(500 * time.Millisecond)
-		return m.refreshNow()()
-	}
+		return m.docker.RemoveContainer(c.ID)
+	})
 }
 
 // containerDisplayName returns the leading (dash-stripped) container name,
@@ -367,69 +379,30 @@ func (m Model) hasUnusedVolumes() bool {
 // imageRemoveCmd / pruneImagesCmd act on the selected image (or all dangling
 // images) and refresh the list, mirroring removeContainerCmd.
 func (m Model) imageRemoveCmd(id string, force bool) tea.Cmd {
-	return func() tea.Msg {
-		if err := m.docker.RemoveImage(id, force); err != nil {
-			return errMsg{err}
-		}
-		time.Sleep(500 * time.Millisecond)
-		return m.refreshNow()()
-	}
+	return m.runDockerOp(nil, func() error { return m.docker.RemoveImage(id, force) })
 }
 
 func (m Model) pruneImagesCmd() tea.Cmd {
-	return func() tea.Msg {
-		if err := m.docker.PruneImages(); err != nil {
-			return errMsg{err}
-		}
-		time.Sleep(500 * time.Millisecond)
-		return m.refreshNow()()
-	}
+	return m.runDockerOp(nil, func() error { return m.docker.PruneImages() })
 }
 
 // pruneContainers prunes every stopped container the daemon still holds and
 // refreshes the list, mirroring pruneImagesCmd. The popup is already in the
 // confirm stage when this is bound, so it runs only after an explicit Yes.
 func (m Model) pruneContainers() tea.Cmd {
-	if m.docker == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		if err := m.docker.PruneContainers(); err != nil {
-			return errMsg{err}
-		}
-		time.Sleep(500 * time.Millisecond)
-		return m.refreshNow()()
-	}
+	return m.runDockerOp(func() bool { return m.docker != nil }, func() error { return m.docker.PruneContainers() })
 }
 
 // volumeRemoveCmd removes the selected volume (with force for an in-use one)
 // and refreshes the list, mirroring imageRemoveCmd.
 func (m Model) volumeRemoveCmd(name string, force bool) tea.Cmd {
-	return func() tea.Msg {
-		if m.activeTab != tabVolumes {
-			return nil
-		}
-		if err := m.docker.RemoveVolume(name, force); err != nil {
-			return errMsg{err}
-		}
-		time.Sleep(500 * time.Millisecond)
-		return m.refreshNow()()
-	}
+	return m.runDockerOp(func() bool { return m.activeTab == tabVolumes }, func() error { return m.docker.RemoveVolume(name, force) })
 }
 
 // pruneVolumesCmd prunes every unused volume the daemon still holds and
 // refreshes the list, mirroring pruneImagesCmd.
 func (m Model) pruneVolumesCmd() tea.Cmd {
-	if m.docker == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		if err := m.docker.PruneVolumes(); err != nil {
-			return errMsg{err}
-		}
-		time.Sleep(500 * time.Millisecond)
-		return m.refreshNow()()
-	}
+	return m.runDockerOp(func() bool { return m.docker != nil }, func() error { return m.docker.PruneVolumes() })
 }
 
 // networkMenuItems builds the first-stage actions for a network. Remove is
@@ -468,31 +441,13 @@ func (m Model) hasUnusedNetworks() bool {
 // networkRemoveCmd removes the selected network and refreshes the list,
 // mirroring volumeRemoveCmd.
 func (m Model) networkRemoveCmd(name string) tea.Cmd {
-	return func() tea.Msg {
-		if m.activeTab != tabNetworks {
-			return nil
-		}
-		if err := m.docker.RemoveNetwork(name); err != nil {
-			return errMsg{err}
-		}
-		time.Sleep(500 * time.Millisecond)
-		return m.refreshNow()()
-	}
+	return m.runDockerOp(func() bool { return m.activeTab == tabNetworks }, func() error { return m.docker.RemoveNetwork(name) })
 }
 
 // pruneNetworksCmd prunes every unused network the daemon still holds and
 // refreshes the list, mirroring pruneVolumesCmd.
 func (m Model) pruneNetworksCmd() tea.Cmd {
-	if m.docker == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		if err := m.docker.PruneNetworks(); err != nil {
-			return errMsg{err}
-		}
-		time.Sleep(500 * time.Millisecond)
-		return m.refreshNow()()
-	}
+	return m.runDockerOp(func() bool { return m.docker != nil }, func() error { return m.docker.PruneNetworks() })
 }
 
 func menuMeasure(items []menuItem, dividers int, header string) (w, h int) {
