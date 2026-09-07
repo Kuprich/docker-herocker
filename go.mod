@@ -7,6 +7,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/creack/pty v1.1.24
+	github.com/gitpod-io/xterm-go v0.0.0-20260906130432-d7fc8882f5e6
 	github.com/mattn/go-runewidth v0.0.19
 	github.com/moby/moby/api v1.55.0
 	github.com/moby/moby/client v0.5.1

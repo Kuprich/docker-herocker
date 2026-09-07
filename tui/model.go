@@ -283,7 +283,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.fitViewports()
 		if m.term != nil {
 			m.term.x, m.term.y, m.term.w, m.term.h = m.termPanelLayout()
-			m.term.clampBody()
+			m.term.resize()
 			if m.term.ptmx != nil {
 				_ = pty.Setsize(m.term.ptmx, &pty.Winsize{
 					Rows: uint16(max(m.term.h-4, 1)),
@@ -539,7 +539,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.closeTerminal()
 		m.term = &termFloat{ptmx: msg.ptmx, cmd: msg.cmd, args: msg.args}
 		m.term.x, m.term.y, m.term.w, m.term.h = m.termPanelLayout()
-		m.term.clampBody()
+		m.term.emu = newTermScreen(max(m.term.w-2, 1), max(m.term.h-4, 1), func(payload string) {
+			if msg.ptmx != nil {
+				_, _ = msg.ptmx.Write([]byte(payload))
+			}
+		})
 		return m, m.termReader()
 
 	case termOutputMsg:
@@ -641,13 +645,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Floating terminal: clicks land on it, except the × badge in the
-		// header row which closes the session.
+		// header row which closes the session. Clicks and wheels inside the
+		// body go to the embedded terminal (program mouse mode when the child
+		// enabled it, scrollback paging otherwise).
 		if m.term != nil {
+			t := m.term
+			sx, sy := msg.X-1, msg.Y-1
 			if msg.Type == tea.MouseLeft && msg.Action != tea.MouseActionMotion {
-				sx, sy := msg.X-1, msg.Y-1
-				if sy == m.term.y+1 && sx >= m.term.x+m.term.w-4 && sx <= m.term.x+m.term.w-2 {
+				if sy == t.y+1 && sx >= t.x+t.w-4 && sx <= t.x+t.w-2 {
 					m.closeTerminal()
 					return m, m.refreshNow()
+				}
+			}
+			if sy >= t.y+3 && sy <= t.y+t.h-2 && sx >= t.x+1 && sx <= t.x+t.w-2 && t.emu != nil {
+				row := max(min(sy-(t.y+3), t.emu.rows()-1), 0)
+				col := max(min(sx-(t.x+1), t.emu.cols()-1), 0)
+				switch msg.Type {
+				case tea.MouseWheelUp:
+					if !t.emu.isAlt() && !msg.Alt && !msg.Ctrl {
+						t.emu.scrollView(-3)
+						return m, nil
+					}
+				case tea.MouseWheelDown:
+					if !t.emu.isAlt() && !msg.Alt && !msg.Ctrl {
+						t.emu.scrollView(3)
+						return m, nil
+					}
+				}
+				if !t.emu.forwardMouse(col, row, msg) {
+					// no mouse mode: a click just refocuses the live view
+					t.emu.snapToBottom()
 				}
 			}
 			return m, nil
@@ -2260,14 +2287,14 @@ func (m Model) renderImageList(w, vw, h int) (string, string) {
 	// then REPOSITORY:TAG / STATUS / CREATED / SIZE / IMAGE ID, all flush-left,
 	// with SIZE right-aligned so units stack in one vertical line.
 	const (
-		repoEnd     = 46  // first rune after REPOSITORY:TAG
-		statusCol   = 47  // status label begins here
-		createdCol  = 59  // CREATED begins here
-		sizeCol     = 72  // SIZE begins here
-		sizeW       = 9   // SIZE column width
-		idCol       = 86  // IMAGE ID begins here
-		idPrefixLen = 7   // len("sha256:")
-		idHexLen    = 12  // hex payload width
+		repoEnd     = 46 // first rune after REPOSITORY:TAG
+		statusCol   = 47 // status label begins here
+		createdCol  = 59 // CREATED begins here
+		sizeCol     = 72 // SIZE begins here
+		sizeW       = 9  // SIZE column width
+		idCol       = 86 // IMAGE ID begins here
+		idPrefixLen = 7  // len("sha256:")
+		idHexLen    = 12 // hex payload width
 	)
 
 	var rows []string
@@ -2660,7 +2687,7 @@ func (m *Model) switchTab(t tab) {
 // the tabNetworks<->tabContainers edges.
 func (m *Model) switchTabRelative(delta int) {
 	n := 4
-	m.switchTab(tab((int(m.activeTab)+delta+n)%n))
+	m.switchTab(tab((int(m.activeTab) + delta + n) % n))
 }
 
 func (m *Model) moveUp() {

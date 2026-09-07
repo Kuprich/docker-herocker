@@ -14,6 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/creack/pty"
+	xterm "github.com/gitpod-io/xterm-go"
 	"github.com/kuri4/dockerherocker/docker"
 	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
@@ -96,7 +97,6 @@ func TestClassifyImage(tt *testing.T) {
 		}
 	}
 }
-
 
 func TestClassifyUsage(tt *testing.T) {
 	cases := []struct {
@@ -745,11 +745,11 @@ func TestVolumeListRendersDotsAndStatusLabels(tt *testing.T) {
 func TestFormatImageSizeSeparatesValueAndUnit(tt *testing.T) {
 	cases := map[int64]string{
 		(1 << 40) + (1 << 39): "1.5 TB",
-		(1 << 30) + (1 << 30)/2: "1.5 GB",
-		(1 << 20) + (1 << 20)/2: "1.5 MB",
-		(1 << 10) + (1 << 10)/2: "1.5 KB",
-		12:                      "12 B",
-		0:                       "0 B",
+		(1 << 30) + (1<<30)/2: "1.5 GB",
+		(1 << 20) + (1<<20)/2: "1.5 MB",
+		(1 << 10) + (1<<10)/2: "1.5 KB",
+		12:                    "12 B",
+		0:                     "0 B",
 	}
 	for in, want := range cases {
 		if got := formatImageSize(in); got != want {
@@ -3534,41 +3534,327 @@ func TestParseSGRState(tt *testing.T) {
 
 // ----- floating terminal (docker exec / attach) -----
 
-func TestTermFloatLineDiscipline(tt *testing.T) {
-	t := &termFloat{}
-	t.append([]byte("hello\r\n"))
-	if len(t.body) != 1 || t.body[0] != "hello" {
-		tt.Fatalf("CRLF line = %q, want [hello]", t.body)
+func TestTermScreenEditing(t *testing.T) {
+	s := newTermScreen(40, 6, nil)
+	s.Feed([]byte("hello\r\n"))
+	if got := strings.TrimRight(s.Text()[0], " "); got != "hello" {
+		t.Errorf("CRLF line = %q, want hello", got)
 	}
-	t.append([]byte("a\x1b[31mb\x1b[0mc\n"))
-	if got := t.body[len(t.body)-1]; got != "abc" {
-		tt.Errorf("ANSI-stripped line = %q, want abc", got)
+	if x, y := s.t.CursorX(), s.t.CursorY(); x != 0 || y != 1 {
+		t.Errorf("cursor after CRLF = %d,%d, want 0,1", x, y)
 	}
-	t.append([]byte("x\x1b]0;title\x07y\n"))
-	if got := t.body[len(t.body)-1]; got != "xy" {
-		tt.Errorf("OSC-stripped line = %q, want xy", got)
+	s.Feed([]byte("a\x1b[31mb\x1b[0mc"))
+	if got := strings.TrimRight(s.Text()[1], " "); got != "abc" {
+		t.Errorf("SGR-split line = %q, want abc", got)
 	}
-	t.append([]byte("tab\tstop\n"))
-	if got := t.body[len(t.body)-1]; got != "tab    stop" {
-		tt.Errorf("tab line = %q, want 4-space expansion", got)
+	if c := termCellAt(s, 1, 1); !c.fgSet || c.fg != termPalette[1] {
+		t.Errorf("SGR cell fg missing: %+v", c)
 	}
-	t.append([]byte("abcd\x7f\n"))
-	if got := t.body[len(t.body)-1]; got != "abc" {
-		tt.Errorf("backspace line = %q, want abc", got)
+	if c := termCellAt(s, 2, 1); c.fgSet {
+		t.Errorf("reset cell still painted: %+v", c)
 	}
-	t.append([]byte("Го\xd0\xb4\x7f!\n"))
-	if got := t.body[len(t.body)-1]; got != "Го!" {
-		tt.Errorf("multibyte backspace line = %q, want Го!", got)
+	// an OSC payload is skipped wholesale
+	s.Feed([]byte("\r\nx\x1b]0;title\x07y\n"))
+	if got := strings.TrimRight(s.Text()[2], " "); got != "xy" {
+		t.Errorf("OSC-stripped line = %q, want xy", got)
 	}
-	// body is clamped to the box height
-	t.h = 6
-	t.append([]byte("1\n2\n3\n4\n5\n6\n"))
-	if len(t.body) != t.h-4 {
-		tt.Errorf("clamped body rows = %d, want %d", len(t.body), t.h-4)
+	// tab jumps to the next 8-column stop
+	s.Feed([]byte("ab\t"))
+	if s.t.CursorX() != 8 {
+		t.Errorf("tab stop cursor = %d, want 8", s.t.CursorX())
 	}
-	if got := t.body[len(t.body)-1]; got != "6" {
-		tt.Errorf("clamped tail = %q, want 6", got)
+	// BS (0x08) moves the cursor left; the raw line editor of the shell drives
+	// the actual erase and sends this sequence after editing
+	s.Feed([]byte("\x08"))
+	if s.t.CursorX() != 7 {
+		t.Errorf("backspace cursor = %d, want 7", s.t.CursorX())
 	}
+	// multibyte runs land intact
+	s.Feed([]byte("\r\nГо!"))
+	if got := strings.TrimRight(s.Text()[4], " "); got != "Го!" {
+		t.Errorf("multibyte line = %q", got)
+	}
+}
+
+func TestTermScreenCursorAndErase(t *testing.T) {
+	s := newTermScreen(40, 6, nil)
+	s.Feed([]byte("abc\x1b[D"))
+	if s.t.CursorX() != 2 {
+		t.Errorf("cursor left = %d, want 2", s.t.CursorX())
+	}
+	s.Feed([]byte("Z"))
+	if got := strings.TrimRight(s.Text()[0], " "); got != "abZ" {
+		t.Errorf("typed-over line = %q, want abZ", got)
+	}
+	s.Feed([]byte("\x1b[2DQ"))
+	if s.t.CursorX() != 2 {
+		t.Errorf("cursor after moves = %d, want 2", s.t.CursorX())
+	}
+	if got := strings.TrimRight(s.Text()[0], " "); got != "aQZ" {
+		t.Errorf("typed-over line = %q, want aQZ", got)
+	}
+	// erase-in-line clears the whole row that contains the cursor
+	s.Feed([]byte("\x1b[2K"))
+	if got := strings.TrimRight(s.Text()[0], " "); got != "" {
+		t.Errorf("erase-in-line left %q", got)
+	}
+	// an editable blank line follows CUP
+	s.Feed([]byte("\x1b[5;1H"))
+	if x, y := s.t.CursorX(), s.t.CursorY(); x != 0 || y != 4 {
+		t.Errorf("CUP cursor = %d,%d, want 0,4", x, y)
+	}
+	// DSR asks for the cursor position and the emulator answers
+	var replies []string
+	s2 := newTermScreen(40, 6, func(r string) { replies = append(replies, r) })
+	s2.Feed([]byte("ab\x1b[6n"))
+	if len(replies) != 1 || replies[0] != "\x1b[1;3R" {
+		t.Errorf("DSR replies = %q, want \\x1b[1;3R", replies)
+	}
+	// DECTCEM hides and shows the block cursor
+	s2.Feed([]byte("\x1b[?25l"))
+	if !s2.t.IsCursorHidden() {
+		t.Error("?25l must hide the cursor")
+	}
+	s2.Feed([]byte("\x1b[?25h"))
+	if s2.t.IsCursorHidden() {
+		t.Error("?25h must show the cursor")
+	}
+}
+
+func TestTermScreenScrollAndWrap(t *testing.T) {
+	s := newTermScreen(5, 3, nil)
+	s.Feed([]byte("012345"))
+	if got := strings.TrimRight(s.Text()[0], " "); got != "01234" {
+		t.Errorf("wrapped first row = %q, want 01234", got)
+	}
+	if got := strings.TrimRight(s.Text()[1], " "); got != "5" {
+		t.Errorf("wrapped second row = %q, want 5", got)
+	}
+	s2 := newTermScreen(40, 3, nil)
+	s2.Feed([]byte("1\r\n2\r\n3\r\n4\r\n"))
+	// every linefeed at the bottom row scrolls, so after four CRLF'd lines
+	// the window shows the last three and the bottom row waits for the cursor
+	if got := strings.TrimRight(s2.Text()[0], " "); got != "3" {
+		t.Errorf("scrolled row0 = %q, want 3", got)
+	}
+	if got := strings.TrimRight(s2.Text()[1], " "); got != "4" {
+		t.Errorf("scrolled row1 = %q, want 4", got)
+	}
+	if got := strings.TrimRight(s2.Text()[2], " "); got != "" {
+		t.Errorf("bottom row = %q, want empty", got)
+	}
+}
+
+func TestTermScreenScrollbackAndSnap(t *testing.T) {
+	s := newTermScreen(20, 3, nil)
+	for i := 1; i <= 9; i++ {
+		s.Feed([]byte(fmt.Sprintf("L%d\r\n", i)))
+	}
+	s.Feed([]byte("> "))
+	if s.scrolledUp() {
+		t.Fatal("fresh terminal at bottom must not report scrolledUp")
+	}
+	if got := strings.TrimRight(s.Text()[0], " "); got != "L8" {
+		t.Fatalf("bottom viewport row0 = %q, want L8", got)
+	}
+	// page back into history three lines
+	s.scrollView(-3)
+	if !s.scrolledUp() {
+		t.Error("scrollView(-3) must enter scrollback")
+	}
+	if got := strings.TrimRight(s.Text()[0], " "); got != "L5" {
+		t.Errorf("scrolled row0 = %q, want L5", got)
+	}
+	// scrolling past the top clamps instead of wrapping
+	s.scrollView(-999)
+	if got := strings.TrimRight(s.Text()[0], " "); got != "L1" {
+		t.Errorf("clamped top row0 = %q, want L1", got)
+	}
+	// snap returns to the live cursor
+	s.snapToBottom()
+	if s.scrolledUp() {
+		t.Error("snapToBottom must leave scrollback")
+	}
+	if got := strings.TrimRight(s.Text()[0], " "); got != "L8" {
+		t.Errorf("snapped row0 = %q, want L8", got)
+	}
+	if got := strings.TrimRight(s.Text()[2], " "); got != ">" {
+		t.Errorf("snapped cursor row = %q, want '>'", got)
+	}
+}
+
+func TestTermForwardPgUpSnapsAndAltScreen(t *testing.T) {
+	ptmx, slave, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty.Open: %v", err)
+	}
+	defer ptmx.Close()
+	defer slave.Close()
+	rawSlave(slave)
+
+	m := detailTestModel()
+	term := &termFloat{ptmx: ptmx, args: []string{"exec", "-it", "web", "sh"}}
+	term.x, term.y, term.w, term.h = m.termPanelLayout()
+	term.emu = newTermScreen(max(term.w-2, 1), max(term.h-4, 1), nil)
+	m.term = term
+	for i := 1; i <= 30; i++ {
+		term.emu.Feed([]byte(fmt.Sprintf("L%d\r\n", i)))
+	}
+	term.emu.Feed([]byte("> "))
+	top := term.emu.Text()[0]
+
+	readSlave := func() string {
+		buf := make([]byte, 16)
+		n, _ := slave.Read(buf)
+		return string(buf[:n])
+	}
+
+	// PgUp pages the embedded history and must not leak bytes to the shell
+	if _, cmd := testUpdate(m, tea.KeyMsg{Type: tea.KeyPgUp}); cmd != nil {
+		t.Errorf("PgUp must not dispatch app commands, got %T", cmd)
+	}
+	if !term.emu.scrolledUp() {
+		t.Error("PgUp must scroll the viewport into history")
+	}
+
+	// a plain keystroke snaps back to the live view and reaches the shell
+	_, _ = testUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	if term.emu.scrolledUp() {
+		t.Error("plain key after PgUp must snap to the live view")
+	}
+	if got := term.emu.Text()[0]; got != top {
+		t.Errorf("viewport after key snap = %q, want back at %q", got, top)
+	}
+	if s := readSlave(); s != "x" {
+		t.Errorf("key reached shell as %q, want x", s)
+	}
+
+	// alternate-screen apps (vim) own PgUp: it must be forwarded untouched
+	term.emu.Feed([]byte("\x1b[?1049h"))
+	if !term.emu.isAlt() {
+		t.Fatal("1049h must activate the alternate buffer")
+	}
+	testUpdate(m, tea.KeyMsg{Type: tea.KeyPgUp})
+	if s := readSlave(); s != "\x1b[5~" {
+		t.Errorf("alternate-screen PgUp = %q, want \\x1b[5~", s)
+	}
+}
+
+func TestTermWheelScrollsViewport(t *testing.T) {
+	ptmx, slave, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty.Open: %v", err)
+	}
+	defer ptmx.Close()
+	defer slave.Close()
+	rawSlave(slave)
+
+	m := detailTestModel()
+	term := &termFloat{ptmx: ptmx, args: []string{"exec", "-it", "web", "sh"}}
+	term.x, term.y, term.w, term.h = m.termPanelLayout()
+	term.emu = newTermScreen(max(term.w-2, 1), max(term.h-4, 1), nil)
+	m.term = term
+	for i := 1; i <= 30; i++ {
+		term.emu.Feed([]byte(fmt.Sprintf("L%d\r\n", i)))
+	}
+	term.emu.Feed([]byte("> "))
+
+	// magic coords inside the panel body (bubbletea X/Y are 1-based)
+	bodyX, bodyY := term.x+2, term.y+4
+	if _, cmd := testUpdate(m, tea.MouseMsg{Type: tea.MouseWheelUp, Action: tea.MouseActionMotion, X: bodyX, Y: bodyY}); cmd != nil {
+		t.Errorf("wheel must not dispatch app commands, got %T", cmd)
+	}
+	if !term.emu.scrolledUp() {
+		t.Error("wheel up over the body must scroll into history")
+	}
+	if _, _ = testUpdate(m, tea.MouseMsg{Type: tea.MouseWheelDown, Action: tea.MouseActionMotion, X: bodyX, Y: bodyY}); term.emu.scrolledUp() {
+		t.Error("wheel down over the body must scroll back to the live view")
+	}
+	// the × badge in the header row still closes the session
+	if _, cmd := testUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: term.x + term.w - 3, Y: term.y + 2}); cmd == nil {
+		t.Error("× badge click must close the terminal and refresh")
+	}
+	if m2, _ := testUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: term.x + term.w - 3, Y: term.y + 2}); m2.term != nil {
+		t.Error("× badge click must tear the session down")
+	}
+}
+
+func TestTermMouseForwarding(t *testing.T) {
+	var replies []string
+	s := newTermScreen(20, 4, func(r string) { replies = append(replies, r) })
+
+	// with no mouse-tracking mode enabled nothing is emitted and callers can
+	// fall back to scrollback behaviour
+	if s.forwardMouse(3, 2, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress}) {
+		t.Error("mouse forward must stay off without an app mouse mode")
+	}
+	if len(replies) != 0 {
+		t.Fatalf("no mode yet but got reports %q", replies)
+	}
+
+	// SGR mouse tracking (1003 = report everything, 1006 = SGR encoding)
+	s.Feed([]byte("\x1b[?1003h\x1b[?1006h"))
+	if !s.forwardMouse(3, 2, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress}) {
+		t.Fatal("mouse forward must engage with 1003+1006")
+	}
+	if want := "\x1b[<0;4;3M"; len(replies) == 0 || replies[len(replies)-1] != want {
+		t.Errorf("SGR press report = %q, want %q", lastOr(replies), want)
+	}
+
+	s.forwardMouse(0, 0, tea.MouseMsg{Type: tea.MouseWheelDown, Action: tea.MouseActionMotion})
+	if want := "\x1b[<65;1;1M"; replies[len(replies)-1] != want {
+		t.Errorf("SGR wheel report = %q, want %q", replies[len(replies)-1], want)
+	}
+
+	// release reports use lowercase m in SGR
+	s.forwardMouse(0, 0, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionRelease})
+	if want := "\x1b[<0;1;1m"; replies[len(replies)-1] != want {
+		t.Errorf("SGR release report = %q, want %q", replies[len(replies)-1], want)
+	}
+}
+
+func lastOr(s []string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	return s[len(s)-1]
+}
+
+func TestTermScreenSGR(t *testing.T) {
+	s := newTermScreen(40, 6, nil)
+	s.Feed([]byte("\x1b[38;5;196mR\x1b[38;2;1;2;3mT\x1b[0mX"))
+	if c := termCellAt(s, 0, 0); !c.fgSet || c.fg != termPalette[196] {
+		t.Errorf("256-color cell = %+v", c)
+	}
+	if c := termCellAt(s, 1, 0); !c.fgSet || c.fg != lipgloss.Color("#010203") {
+		t.Errorf("truecolor cell = %+v", c)
+	}
+	if c := termCellAt(s, 2, 0); c.fgSet {
+		t.Errorf("reset cell still painted: %+v", c)
+	}
+	s.Feed([]byte("\x1b[44mA\x1b[0m"))
+	if c := termCellAt(s, 3, 0); !c.bgSet || c.bg != termPalette[4] {
+		t.Errorf("background cell = %+v", c)
+	}
+	s.Feed([]byte("\x1b[1;4;7mB"))
+	if c := termCellAt(s, 4, 0); !c.bold || !c.underline || !c.reverse {
+		t.Errorf("attributes cell = %+v", c)
+	}
+}
+
+// termCellAt reads one cell of the emulator screen for assertions.
+func termCellAt(s *termScreen, x, y int) termCell {
+	buf := s.buffer()
+	if y < 0 || y >= s.t.Rows() {
+		return termCell{}
+	}
+	line := buf.Lines.Get(buf.YDisp + y)
+	if x < 0 || x >= s.t.Cols() || x >= line.Len {
+		return termCell{}
+	}
+	cell := xterm.NewCellData()
+	line.LoadCell(x, cell)
+	return cellFromData(cell)
 }
 
 func TestTermRenderPanelAndSplice(tt *testing.T) {
@@ -3576,7 +3862,8 @@ func TestTermRenderPanelAndSplice(tt *testing.T) {
 	term := &termFloat{args: []string{"exec", "-it", "web", "sh"}}
 	term.x, term.y, term.w, term.h = m.termPanelLayout()
 	term.h = 6
-	term.append([]byte("root@abc:/#\n"))
+	term.emu = newTermScreen(max(term.w-2, 1), max(term.h-4, 1), nil)
+	term.append([]byte("root@abc:/#\r\n"))
 	m.term = term
 
 	rows := m.renderTerminalPanel()
@@ -3598,6 +3885,18 @@ func TestTermRenderPanelAndSplice(tt *testing.T) {
 	body := stripANSI(strings.Join(rows[3:], "\n"))
 	if !strings.Contains(body, "root@abc:/#") {
 		tt.Errorf("body = %q, want the shell prompt", body)
+	}
+
+	// unterminated typed input shows on the cursor row, before Enter
+	term.append([]byte("ls -la"))
+	rows = m.renderTerminalPanel()
+	body = stripANSI(strings.Join(rows[3:], "\n"))
+	if !strings.Contains(body, "ls -la") {
+		tt.Errorf("body = %q, want the live typed input visible", body)
+	}
+	lb := stripANSI(rows[len(rows)-2])
+	if !strings.Contains(lb, "ls -la") {
+		tt.Errorf("bottom body row = %q, want the live input row", lb)
 	}
 
 	// the panel splices into the frame and every covered row keeps frame width
@@ -3631,6 +3930,7 @@ func TestTermForwardAndStream(tt *testing.T) {
 	m := detailTestModel()
 	term := &termFloat{ptmx: ptmx, args: []string{"exec", "-it", "web", "sh"}}
 	term.x, term.y, term.w, term.h = m.termPanelLayout()
+	term.emu = newTermScreen(max(term.w-2, 1), max(term.h-4, 1), nil)
 	m.term = term
 
 	readSlave := func() string {
@@ -3685,10 +3985,11 @@ func TestTermForwardAndStream(tt *testing.T) {
 		}
 	}
 
-	// output streamed into the model lands in the body and re-issues the reader
+	// output streamed into the model lands on the emulated screen and
+	// re-issues the reader
 	next, cmd = testUpdate(next, termOutputMsg([]byte("hello\n")))
-	if len(next.term.body) == 0 || next.term.body[len(next.term.body)-1] != "hello" {
-		tt.Errorf("term output body = %q, want hello", next.term.body)
+	if next.term.emu == nil || !strings.Contains(strings.Join(next.term.emu.Text(), "\n"), "hello") {
+		tt.Errorf("term output emulator = %q, want hello on screen", next.term.emu.Text())
 	}
 	if cmd == nil {
 		tt.Error("termOutputMsg must re-issue the reader command")
@@ -3741,6 +4042,9 @@ func TestTermStartReplacesSession(tt *testing.T) {
 	}
 	if got := next.term.title(); got != "docker attach --sig-proxy=false web" {
 		tt.Errorf("title = %q, want docker attach --sig-proxy=false web", got)
+	}
+	if next.term.emu == nil {
+		tt.Error("termStartMsg must size the emulator to the panel body")
 	}
 	if cmd == nil {
 		tt.Error("termStartMsg must start the reader")
