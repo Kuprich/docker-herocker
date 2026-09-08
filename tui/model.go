@@ -286,7 +286,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.term.resize()
 			if m.term.ptmx != nil {
 				_ = pty.Setsize(m.term.ptmx, &pty.Winsize{
-					Rows: uint16(max(m.term.h-4, 1)),
+					Rows: uint16(max(m.term.h-5, 1)),
 					Cols: uint16(max(m.term.w-2*termInset, 1)),
 				})
 			}
@@ -539,7 +539,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.closeTerminal()
 		m.term = &termFloat{ptmx: msg.ptmx, cmd: msg.cmd, args: msg.args}
 		m.term.x, m.term.y, m.term.w, m.term.h = m.termPanelLayout()
-		m.term.emu = newTermScreen(max(m.term.w-2*termInset, 1), max(m.term.h-4, 1), func(payload string) {
+		m.term.emu = newTermScreen(max(m.term.w-2*termInset, 1), max(m.term.h-5, 1), func(payload string) {
 			if msg.ptmx != nil {
 				_, _ = msg.ptmx.Write([]byte(payload))
 			}
@@ -651,8 +651,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.term != nil {
 			t := m.term
 			sx, sy := msg.X-1, msg.Y-1
-			if sy >= t.y+3 && sy <= t.y+t.h-2 && sx >= t.x+termInset && sx <= t.x+t.w-1-termInset && t.emu != nil {
-				row := max(min(sy-(t.y+3), t.emu.rows()-1), 0)
+			if sy >= t.y+4 && sy <= t.y+t.h-2 && sx >= t.x+termInset && sx <= t.x+t.w-1-termInset && t.emu != nil {
+				row := max(min(sy-(t.y+4), t.emu.rows()-1), 0)
 				col := max(min(sx-(t.x+termInset), t.emu.cols()-1), 0)
 				switch msg.Type {
 				case tea.MouseWheelUp:

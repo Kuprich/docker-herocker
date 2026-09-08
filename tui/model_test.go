@@ -3696,7 +3696,7 @@ func TestTermForwardPgUpSnapsAndAltScreen(t *testing.T) {
 	m := detailTestModel()
 	term := &termFloat{ptmx: ptmx, args: []string{"exec", "-it", "web", "sh"}}
 	term.x, term.y, term.w, term.h = m.termPanelLayout()
-	term.emu = newTermScreen(max(term.w-2*termInset, 1), max(term.h-4, 1), nil)
+	term.emu = newTermScreen(max(term.w-2*termInset, 1), max(term.h-5, 1), nil)
 	m.term = term
 	for i := 1; i <= 30; i++ {
 		term.emu.Feed([]byte(fmt.Sprintf("L%d\r\n", i)))
@@ -3753,7 +3753,7 @@ func TestTermWheelScrollsViewport(t *testing.T) {
 	m := detailTestModel()
 	term := &termFloat{ptmx: ptmx, args: []string{"exec", "-it", "web", "sh"}}
 	term.x, term.y, term.w, term.h = m.termPanelLayout()
-	term.emu = newTermScreen(max(term.w-2*termInset, 1), max(term.h-4, 1), nil)
+	term.emu = newTermScreen(max(term.w-2*termInset, 1), max(term.h-5, 1), nil)
 	m.term = term
 	for i := 1; i <= 30; i++ {
 		term.emu.Feed([]byte(fmt.Sprintf("L%d\r\n", i)))
@@ -3761,9 +3761,9 @@ func TestTermWheelScrollsViewport(t *testing.T) {
 	term.emu.Feed([]byte("> "))
 
 	// magic coords inside the console (bubbletea X/Y are 1-based): the console
-	// starts at (term.x+termInset, term.y+3) below the header, divider and
-	// top padding row.
-	bodyX, bodyY := term.x+termInset+1, term.y+4
+	// starts at (term.x+termInset, term.y+4) below the header, its divider,
+	// the top divider and the padding row.
+	bodyX, bodyY := term.x+termInset+1, term.y+5
 	if _, cmd := testUpdate(m, tea.MouseMsg{Type: tea.MouseWheelUp, Action: tea.MouseActionMotion, X: bodyX, Y: bodyY}); cmd != nil {
 		t.Errorf("wheel must not dispatch app commands, got %T", cmd)
 	}
@@ -3894,8 +3894,8 @@ func TestTermRenderPanelAndSplice(tt *testing.T) {
 	m := detailTestModel()
 	term := &termFloat{args: []string{"exec", "-it", "web", "sh"}}
 	term.x, term.y, term.w, term.h = m.termPanelLayout()
-	term.h = 6
-	term.emu = newTermScreen(max(term.w-2*termInset, 1), max(term.h-4, 1), nil)
+	term.h = 7
+	term.emu = newTermScreen(max(term.w-2*termInset, 1), max(term.h-5, 1), nil)
 	term.append([]byte("root@abc:/#\r\n"))
 	m.term = term
 
@@ -3914,7 +3914,7 @@ func TestTermRenderPanelAndSplice(tt *testing.T) {
 			tt.Errorf("panel row width = %d, want %d: %q", lipgloss.Width(r), term.w, stripANSI(r))
 		}
 	}
-	header := stripANSI(rows[0])
+	header := stripANSI(rows[1])
 	if !strings.Contains(header, "docker exec -it web sh") {
 		tt.Errorf("header = %q, want the docker invocation", header)
 	}
@@ -3922,8 +3922,8 @@ func TestTermRenderPanelAndSplice(tt *testing.T) {
 		tt.Errorf("header = %q, want the termInset left padding before the title", header)
 	}
 	// the title is yellow on the surface background
-	if !strings.Contains(rows[0], "38;2;210;153;34") {
-		tt.Errorf("header must be yellow, got %q", rows[0])
+	if !strings.Contains(rows[1], "38;2;210;153;34") {
+		tt.Errorf("header must be yellow, got %q", rows[1])
 	}
 	if strings.Contains(header, "×") {
 		tt.Error("header must have no close badge after the divider redesign")
@@ -3931,13 +3931,15 @@ func TestTermRenderPanelAndSplice(tt *testing.T) {
 	if strings.ContainsAny(header, "│┌─└┘") {
 		tt.Errorf("frameless header leaked border glyphs: %q", header)
 	}
-	// the divider row separates header from console
-	if d := stripANSI(rows[1]); !strings.Contains(d, "─") {
-		tt.Errorf("divider row = %q, want a ─ separator", d)
+	// the header is boxed between two divider rows
+	for i := 0; i < 3; i += 2 {
+		if d := stripANSI(rows[i]); !strings.Contains(d, "─") {
+			tt.Errorf("divider row %d = %q, want a ─ separator", i, d)
+		}
 	}
-	// the console body is the top/bottom-padded middle region (header,
-	// divider, one padding row top, one padding row bottom)
-	body := stripANSI(strings.Join(rows[3:term.h-1], "\n"))
+	// the console body is the padded middle region (two dividers, the header,
+	// one padding row top, one padding row bottom)
+	body := stripANSI(strings.Join(rows[4:term.h-1], "\n"))
 	if !strings.Contains(body, "root@abc:/#") {
 		tt.Errorf("body = %q, want the shell prompt", body)
 	}
@@ -3945,7 +3947,7 @@ func TestTermRenderPanelAndSplice(tt *testing.T) {
 	// unterminated typed input shows on the cursor row, before Enter
 	term.append([]byte("ls -la"))
 	rows = m.renderTerminalPanel()
-	lb := stripANSI(strings.Join(rows[3:term.h-1], "\n"))
+	lb := stripANSI(strings.Join(rows[4:term.h-1], "\n"))
 	if !strings.Contains(lb, "ls -la") {
 		tt.Errorf("body = %q, want the typed input visible", lb)
 	}
@@ -3961,9 +3963,10 @@ func TestTermRenderPanelAndSplice(tt *testing.T) {
 			tt.Errorf("frame row %d width = %d, want %d", term.y+r, lipgloss.Width(row), m.width)
 		}
 	}
-	// the header text is visible within the spliced frame
-	if !strings.Contains(stripANSI(frameLines[term.y]), "docker exec -it web sh") {
-		tt.Errorf("spliced header row = %q", stripANSI(frameLines[term.y]))
+	// the header text is visible within the spliced frame (row 0 is the top
+	// divider, the header sits below it)
+	if !strings.Contains(stripANSI(frameLines[term.y+1]), "docker exec -it web sh") {
+		tt.Errorf("spliced header row = %q", stripANSI(frameLines[term.y+1]))
 	}
 }
 
@@ -3981,7 +3984,7 @@ func TestTermForwardAndStream(tt *testing.T) {
 	m := detailTestModel()
 	term := &termFloat{ptmx: ptmx, args: []string{"exec", "-it", "web", "sh"}}
 	term.x, term.y, term.w, term.h = m.termPanelLayout()
-	term.emu = newTermScreen(max(term.w-2*termInset, 1), max(term.h-4, 1), nil)
+	term.emu = newTermScreen(max(term.w-2*termInset, 1), max(term.h-5, 1), nil)
 	m.term = term
 
 	readSlave := func() string {

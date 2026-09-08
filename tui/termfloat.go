@@ -119,7 +119,7 @@ func (m Model) launchTerminal(args ...string) tea.Cmd {
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 	_, _, w, h := m.termPanelLayout()
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
-		Rows: uint16(max(h-4, 1)),
+		Rows: uint16(max(h-5, 1)),
 		Cols: uint16(max(w-2*termInset, 1)),
 	})
 	if err != nil {
@@ -173,11 +173,11 @@ func (m Model) termReader() tea.Cmd {
 }
 
 // resize re-sizes the emulator and the pty to the current console geometry
-// (the full block minus the surface insets and the header/divider/padding
+// (the full block minus the surface insets and the divider/header/padding
 // rows). The child shell redraws after the SIGWINCH the pty resize delivers.
 func (t *termFloat) resize() {
 	if t.emu != nil {
-		t.emu.resize(max(t.w-2*termInset, 1), max(t.h-4, 1))
+		t.emu.resize(max(t.w-2*termInset, 1), max(t.h-5, 1))
 	}
 }
 
@@ -624,11 +624,11 @@ func (t *termFloat) renderBody(r int) string {
 
 // ----- the floating panel -----
 
-// renderTerminalPanel draws the opaque terminal block: a header row (the
-// docker invocation in yellow), a horizontal divider, one empty padding row,
-// the emulator screen inset by termInset on each side, and a final empty
-// padding row so the console is padded top and bottom too. Every block cell
-// carries the Surface background, so the app behind never shows through.
+// renderTerminalPanel draws the opaque terminal block: a divider row, the
+// header row (the docker invocation in yellow), another divider row below it,
+// a padding row, the emulator screen inset by termInset on each side, and a
+// final padding row so the console is padded top and bottom too. Every block
+// cell carries the Surface background, so the app behind never shows through.
 func (m Model) renderTerminalPanel() []string {
 	term := m.term
 	if term == nil {
@@ -640,10 +640,11 @@ func (m Model) renderTerminalPanel() []string {
 		Foreground(t.Border).
 		Render(strings.Repeat("─", max(term.w, 0)))
 	rows := make([]string, 0, term.h)
+	rows = append(rows, divider)
 	rows = append(rows, m.renderTermHeader())
 	rows = append(rows, divider)
 	rows = append(rows, fill)
-	for r := 0; r < max(term.h-4, 0); r++ {
+	for r := 0; r < max(term.h-5, 0); r++ {
 		rows = append(rows, term.renderBody(r))
 	}
 	rows = append(rows, fill)
