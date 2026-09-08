@@ -26,7 +26,7 @@ import (
 // xterm.js state machine) and repainted in the panel with the block cursor and
 // SGR colours, while every keystroke is forwarded verbatim into the pty. The
 // session ends when the shell exits (exit/ctrl+d) or detaches (ctrl-p ctrl-q
-// inside docker attach); the × badge in the panel header kills it too.
+// inside docker attach).
 type termFloat struct {
 	ptmx *os.File
 	cmd  *exec.Cmd
@@ -120,7 +120,7 @@ func (m Model) launchTerminal(args ...string) tea.Cmd {
 	_, _, w, h := m.termPanelLayout()
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
 		Rows: uint16(max(h-4, 1)),
-		Cols: uint16(max(w-2, 1)),
+		Cols: uint16(max(w-2*termInset, 1)),
 	})
 	if err != nil {
 		return func() tea.Msg { return errMsg{err} }
@@ -130,15 +130,26 @@ func (m Model) launchTerminal(args ...string) tea.Cmd {
 
 // termPanelLayout computes the floating panel geometry: slightly inset from
 // the terminal, centered, avoiding the tab bar.
+// termInset is the opaque surface padding between the block edges and the
+// console: the app's own rows (coloured selections etc.) must never bleed
+// into the terminal, so the whole block carries the Surface background and
+// the console floats on an inset of empty surface cells.
+const termInset = 2
+
+// termPanelLayout returns the floating terminal block: an opaque Surface
+// rectangle, roughly 20% narrower than the screen and vertically centered
+// below the tab bar, so the app stays visible in the margins around it. The
+// console itself is inset inside the block (see termInset), which gives it
+// visible side and top gaps no matter what the app paints behind the block.
 func (m Model) termPanelLayout() (x, y, w, h int) {
 	inner := innerW(m.width)
-	w = max(20, inner-4)
+	w = max(20, inner-10)
 	if w > inner {
 		w = inner
 	}
 	h = max(8, m.height-6)
 	x = max(1, (m.width-w)/2)
-	y = max(tabBarHeight+2, (m.height-h)/2)
+	y = max(1, (m.height-h)/2)
 	return x, y, w, h
 }
 
@@ -161,11 +172,12 @@ func (m Model) termReader() tea.Cmd {
 	}
 }
 
-// resize re-sizes the emulator and the pty to the current panel geometry.
-// The child shell redraws after the SIGWINCH the pty resize delivers.
+// resize re-sizes the emulator and the pty to the current console geometry
+// (the full block minus the surface insets and the header/divider/padding
+// rows). The child shell redraws after the SIGWINCH the pty resize delivers.
 func (t *termFloat) resize() {
 	if t.emu != nil {
-		t.emu.resize(max(t.w-2, 1), max(t.h-4, 1))
+		t.emu.resize(max(t.w-2*termInset, 1), max(t.h-4, 1))
 	}
 }
 
@@ -584,56 +596,74 @@ func (g paintGroup) render() string {
 		}
 		return st.Render(g.text)
 	}
-	return lipgloss.NewStyle().
+	st := lipgloss.NewStyle().
 		Foreground(c.fg).
-		Background(c.bg).
 		Bold(c.bold).
 		Underline(c.underline).
-		Reverse(g.cursor || c.reverse).
-		Render(g.text)
+		Reverse(g.cursor || c.reverse)
+	if c.bgSet {
+		st = st.Background(c.bg)
+	} else {
+		// cells without an explicit background must keep the panel surface
+		// opaque, otherwise the frame behind the floating panel shows through
+		st = st.Background(t.Surface)
+	}
+	return st.Render(g.text)
 }
 
-// renderBody paints the panel body row r (0 = top), the emulator's screen.
+// renderBody paints one console row r (0 = top) as the emulator's screen,
+// padded left and right with opaque surface cells so the console never
+// touches the block edges.
 func (t *termFloat) renderBody(r int) string {
+	pad := MenuItemStyle.Render(strings.Repeat(" ", termInset))
 	if t.emu == nil {
-		return MenuItemStyle.Render(strings.Repeat(" ", max(t.w-2, 0)))
+		return MenuItemStyle.Render(strings.Repeat(" ", max(t.w, 0)))
 	}
-	return t.emu.renderRow(r)
+	return pad + t.emu.renderRow(r) + pad
 }
 
 // ----- the floating panel -----
 
-// renderTerminalPanel draws the box, header (the docker invocation with a
-// click-to-close × badge) and the emulator screen as the body.
+// renderTerminalPanel draws the opaque terminal block: a header row (the
+// docker invocation in yellow), a horizontal divider, one empty padding row,
+// the emulator screen inset by termInset on each side, and a final empty
+// padding row so the console is padded top and bottom too. Every block cell
+// carries the Surface background, so the app behind never shows through.
 func (m Model) renderTerminalPanel() []string {
-	t := m.term
-	if t == nil {
+	term := m.term
+	if term == nil {
 		return nil
 	}
-	pw := t.w
-	iw := max(pw-2, 0)
-	box := MenuBoxStyle
-
-	rows := []string{box.Render("┌" + strings.Repeat("─", iw) + "┐")}
-
-	titleW := max(iw-4, 0)
-	title := padMenuRunes(t.title(), titleW)
-	rows = append(rows,
-		box.Render("│")+
-			box.Render(" ")+
-			MenuTitleStyle.Render(title)+
-			box.Render(" ")+
-			MenuCliStyle.Render("×")+
-			box.Render(" ")+
-			box.Render("│"),
-	)
-	rows = append(rows, box.Render("│"+strings.Repeat("─", iw)+"│"))
-
-	for r := 0; r < max(t.h-4, 1); r++ {
-		rows = append(rows, box.Render("│")+t.renderBody(r)+box.Render("│"))
+	fill := MenuItemStyle.Render(strings.Repeat(" ", max(term.w, 0)))
+	divider := lipgloss.NewStyle().
+		Background(t.Surface).
+		Foreground(t.Border).
+		Render(strings.Repeat("─", max(term.w, 0)))
+	rows := make([]string, 0, term.h)
+	rows = append(rows, m.renderTermHeader())
+	rows = append(rows, divider)
+	rows = append(rows, fill)
+	for r := 0; r < max(term.h-4, 0); r++ {
+		rows = append(rows, term.renderBody(r))
 	}
-	rows = append(rows, box.Render("└"+strings.Repeat("─", iw)+"┘"))
+	rows = append(rows, fill)
 	return rows
+}
+
+// renderTermHeader draws the single line of chrome above the divider: the
+// docker invocation in yellow, inset left so it aligns with the console. It
+// shares the surface background with the block so no underlying cells leak
+// through.
+func (m Model) renderTermHeader() string {
+	term := m.term
+	titleW := max(term.w-termInset, 0)
+	title := padMenuRunes(term.title(), titleW)
+	header := lipgloss.NewStyle().
+		Background(t.Surface).
+		Foreground(t.Warning).
+		Bold(true).
+		Render(title)
+	return MenuItemStyle.Render(strings.Repeat(" ", termInset)) + header
 }
 
 // spliceTerminal overlays the floating panel onto the fully rendered frame,

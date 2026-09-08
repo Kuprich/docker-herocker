@@ -50,7 +50,7 @@ func TestLiveUIFrame(t *testing.T) {
 	term := &termFloat{ptmx: ptmx, args: []string{"exec", "-it", container, shell}}
 	term.x, term.y, term.w, term.h = m.termPanelLayout()
 	term.h = 6
-	term.emu = newTermScreen(max(term.w-2, 1), max(term.h-4, 1), reply)
+	term.emu = newTermScreen(max(term.w-2*termInset, 1), max(term.h-4, 1), reply)
 	m.term = term
 
 	// Reader goroutine: pty -> emulator (mirrors termOutputMsg path).

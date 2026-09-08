@@ -287,7 +287,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.term.ptmx != nil {
 				_ = pty.Setsize(m.term.ptmx, &pty.Winsize{
 					Rows: uint16(max(m.term.h-4, 1)),
-					Cols: uint16(max(m.term.w-2, 1)),
+					Cols: uint16(max(m.term.w-2*termInset, 1)),
 				})
 			}
 		}
@@ -539,7 +539,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.closeTerminal()
 		m.term = &termFloat{ptmx: msg.ptmx, cmd: msg.cmd, args: msg.args}
 		m.term.x, m.term.y, m.term.w, m.term.h = m.termPanelLayout()
-		m.term.emu = newTermScreen(max(m.term.w-2, 1), max(m.term.h-4, 1), func(payload string) {
+		m.term.emu = newTermScreen(max(m.term.w-2*termInset, 1), max(m.term.h-4, 1), func(payload string) {
 			if msg.ptmx != nil {
 				_, _ = msg.ptmx.Write([]byte(payload))
 			}
@@ -644,22 +644,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// Floating terminal: clicks land on it, except the × badge in the
-		// header row which closes the session. Clicks and wheels inside the
-		// body go to the embedded terminal (program mouse mode when the child
-		// enabled it, scrollback paging otherwise).
+		// Floating terminal: clicks and wheels inside the console go to the
+		// embedded terminal (program mouse mode when the child enabled it,
+		// scrollback paging otherwise). The header/divider/padding rows around
+		// it are inert but still swallow the event.
 		if m.term != nil {
 			t := m.term
 			sx, sy := msg.X-1, msg.Y-1
-			if msg.Type == tea.MouseLeft && msg.Action != tea.MouseActionMotion {
-				if sy == t.y+1 && sx >= t.x+t.w-4 && sx <= t.x+t.w-2 {
-					m.closeTerminal()
-					return m, m.refreshNow()
-				}
-			}
-			if sy >= t.y+3 && sy <= t.y+t.h-2 && sx >= t.x+1 && sx <= t.x+t.w-2 && t.emu != nil {
+			if sy >= t.y+3 && sy <= t.y+t.h-2 && sx >= t.x+termInset && sx <= t.x+t.w-1-termInset && t.emu != nil {
 				row := max(min(sy-(t.y+3), t.emu.rows()-1), 0)
-				col := max(min(sx-(t.x+1), t.emu.cols()-1), 0)
+				col := max(min(sx-(t.x+termInset), t.emu.cols()-1), 0)
 				switch msg.Type {
 				case tea.MouseWheelUp:
 					if !t.emu.isAlt() && !msg.Alt && !msg.Ctrl {

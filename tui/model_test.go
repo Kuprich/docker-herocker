@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -3695,7 +3696,7 @@ func TestTermForwardPgUpSnapsAndAltScreen(t *testing.T) {
 	m := detailTestModel()
 	term := &termFloat{ptmx: ptmx, args: []string{"exec", "-it", "web", "sh"}}
 	term.x, term.y, term.w, term.h = m.termPanelLayout()
-	term.emu = newTermScreen(max(term.w-2, 1), max(term.h-4, 1), nil)
+	term.emu = newTermScreen(max(term.w-2*termInset, 1), max(term.h-4, 1), nil)
 	m.term = term
 	for i := 1; i <= 30; i++ {
 		term.emu.Feed([]byte(fmt.Sprintf("L%d\r\n", i)))
@@ -3752,15 +3753,17 @@ func TestTermWheelScrollsViewport(t *testing.T) {
 	m := detailTestModel()
 	term := &termFloat{ptmx: ptmx, args: []string{"exec", "-it", "web", "sh"}}
 	term.x, term.y, term.w, term.h = m.termPanelLayout()
-	term.emu = newTermScreen(max(term.w-2, 1), max(term.h-4, 1), nil)
+	term.emu = newTermScreen(max(term.w-2*termInset, 1), max(term.h-4, 1), nil)
 	m.term = term
 	for i := 1; i <= 30; i++ {
 		term.emu.Feed([]byte(fmt.Sprintf("L%d\r\n", i)))
 	}
 	term.emu.Feed([]byte("> "))
 
-	// magic coords inside the panel body (bubbletea X/Y are 1-based)
-	bodyX, bodyY := term.x+2, term.y+4
+	// magic coords inside the console (bubbletea X/Y are 1-based): the console
+	// starts at (term.x+termInset, term.y+3) below the header, divider and
+	// top padding row.
+	bodyX, bodyY := term.x+termInset+1, term.y+4
 	if _, cmd := testUpdate(m, tea.MouseMsg{Type: tea.MouseWheelUp, Action: tea.MouseActionMotion, X: bodyX, Y: bodyY}); cmd != nil {
 		t.Errorf("wheel must not dispatch app commands, got %T", cmd)
 	}
@@ -3770,12 +3773,12 @@ func TestTermWheelScrollsViewport(t *testing.T) {
 	if _, _ = testUpdate(m, tea.MouseMsg{Type: tea.MouseWheelDown, Action: tea.MouseActionMotion, X: bodyX, Y: bodyY}); term.emu.scrolledUp() {
 		t.Error("wheel down over the body must scroll back to the live view")
 	}
-	// the × badge in the header row still closes the session
-	if _, cmd := testUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: term.x + term.w - 3, Y: term.y + 2}); cmd == nil {
-		t.Error("× badge click must close the terminal and refresh")
+	// the header/divider/padding area swallows clicks without closing anything
+	if _, cmd := testUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: term.x + termInset + 1, Y: term.y + 1}); cmd != nil {
+		t.Errorf("header click must not dispatch commands, got %v", cmd)
 	}
-	if m2, _ := testUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: term.x + term.w - 3, Y: term.y + 2}); m2.term != nil {
-		t.Error("× badge click must tear the session down")
+	if m2, _ := testUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: term.x + termInset + 1, Y: term.y + 1}); m2.term == nil {
+		t.Error("header click must not tear the session down")
 	}
 }
 
@@ -3820,6 +3823,36 @@ func lastOr(s []string) string {
 	return s[len(s)-1]
 }
 
+// TestTermColoredCellKeepsPanelSurface guards the frameless panel: cells with
+// a foreground colour but no explicit background must render with the panel
+// surface behind them, otherwise the frame underneath the floating terminal
+// shows through as a patchy background.
+func TestTermColoredCellKeepsPanelSurface(tt *testing.T) {
+	// lipgloss downgrades to the Ascii profile when stdout is not a TTY;
+	// force TrueColor so the escape codes the fix relies on are actually emitted.
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	tt.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+
+	surface := parseHexRGB(string(t.Surface))
+	s := newTermScreen(20, 3, nil)
+	s.Feed([]byte("\x1b[31m" + strings.Repeat("R", 20)))
+	row := s.renderRow(0)
+	want := fmt.Sprintf("48;2;%d;%d;%d", surface[0], surface[1], surface[2])
+	if !strings.Contains(row, want) {
+		tt.Fatalf("colored fg-only row must keep the panel surface bg, got %q", row)
+	}
+	if w := lipgloss.Width(row); w != 20 {
+		tt.Fatalf("row width = %d, want 20", w)
+	}
+}
+
+func parseHexRGB(hex string) [3]int {
+	hex = strings.TrimPrefix(hex, "#")
+	v, _ := strconv.ParseUint(hex, 16, 32)
+	return [3]int{int(v >> 16 & 0xff), int(v >> 8 & 0xff), int(v & 0xff)}
+}
+
 func TestTermScreenSGR(t *testing.T) {
 	s := newTermScreen(40, 6, nil)
 	s.Feed([]byte("\x1b[38;5;196mR\x1b[38;2;1;2;3mT\x1b[0mX"))
@@ -3862,9 +3895,15 @@ func TestTermRenderPanelAndSplice(tt *testing.T) {
 	term := &termFloat{args: []string{"exec", "-it", "web", "sh"}}
 	term.x, term.y, term.w, term.h = m.termPanelLayout()
 	term.h = 6
-	term.emu = newTermScreen(max(term.w-2, 1), max(term.h-4, 1), nil)
+	term.emu = newTermScreen(max(term.w-2*termInset, 1), max(term.h-4, 1), nil)
 	term.append([]byte("root@abc:/#\r\n"))
 	m.term = term
+
+	// lipgloss downgrades to the Ascii profile when stdout is not a TTY;
+	// force TrueColor so the yellow header escape is actually emitted.
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	tt.Cleanup(func() { lipgloss.SetColorProfile(prev) })
 
 	rows := m.renderTerminalPanel()
 	if len(rows) != term.h {
@@ -3875,14 +3914,30 @@ func TestTermRenderPanelAndSplice(tt *testing.T) {
 			tt.Errorf("panel row width = %d, want %d: %q", lipgloss.Width(r), term.w, stripANSI(r))
 		}
 	}
-	header := stripANSI(rows[1])
+	header := stripANSI(rows[0])
 	if !strings.Contains(header, "docker exec -it web sh") {
 		tt.Errorf("header = %q, want the docker invocation", header)
 	}
-	if !strings.Contains(header, "×") {
-		tt.Error("header must carry the close badge ×")
+	if !strings.HasPrefix(header, "  docker") {
+		tt.Errorf("header = %q, want the termInset left padding before the title", header)
 	}
-	body := stripANSI(strings.Join(rows[3:], "\n"))
+	// the title is yellow on the surface background
+	if !strings.Contains(rows[0], "38;2;210;153;34") {
+		tt.Errorf("header must be yellow, got %q", rows[0])
+	}
+	if strings.Contains(header, "×") {
+		tt.Error("header must have no close badge after the divider redesign")
+	}
+	if strings.ContainsAny(header, "│┌─└┘") {
+		tt.Errorf("frameless header leaked border glyphs: %q", header)
+	}
+	// the divider row separates header from console
+	if d := stripANSI(rows[1]); !strings.Contains(d, "─") {
+		tt.Errorf("divider row = %q, want a ─ separator", d)
+	}
+	// the console body is the top/bottom-padded middle region (header,
+	// divider, one padding row top, one padding row bottom)
+	body := stripANSI(strings.Join(rows[3:term.h-1], "\n"))
 	if !strings.Contains(body, "root@abc:/#") {
 		tt.Errorf("body = %q, want the shell prompt", body)
 	}
@@ -3890,13 +3945,9 @@ func TestTermRenderPanelAndSplice(tt *testing.T) {
 	// unterminated typed input shows on the cursor row, before Enter
 	term.append([]byte("ls -la"))
 	rows = m.renderTerminalPanel()
-	body = stripANSI(strings.Join(rows[3:], "\n"))
-	if !strings.Contains(body, "ls -la") {
-		tt.Errorf("body = %q, want the live typed input visible", body)
-	}
-	lb := stripANSI(rows[len(rows)-2])
+	lb := stripANSI(strings.Join(rows[3:term.h-1], "\n"))
 	if !strings.Contains(lb, "ls -la") {
-		tt.Errorf("bottom body row = %q, want the live input row", lb)
+		tt.Errorf("body = %q, want the typed input visible", lb)
 	}
 
 	// the panel splices into the frame and every covered row keeps frame width
@@ -3911,8 +3962,8 @@ func TestTermRenderPanelAndSplice(tt *testing.T) {
 		}
 	}
 	// the header text is visible within the spliced frame
-	if !strings.Contains(stripANSI(frameLines[term.y+1]), "docker exec -it web sh") {
-		tt.Errorf("spliced header row = %q", stripANSI(frameLines[term.y+1]))
+	if !strings.Contains(stripANSI(frameLines[term.y]), "docker exec -it web sh") {
+		tt.Errorf("spliced header row = %q", stripANSI(frameLines[term.y]))
 	}
 }
 
@@ -3930,7 +3981,7 @@ func TestTermForwardAndStream(tt *testing.T) {
 	m := detailTestModel()
 	term := &termFloat{ptmx: ptmx, args: []string{"exec", "-it", "web", "sh"}}
 	term.x, term.y, term.w, term.h = m.termPanelLayout()
-	term.emu = newTermScreen(max(term.w-2, 1), max(term.h-4, 1), nil)
+	term.emu = newTermScreen(max(term.w-2*termInset, 1), max(term.h-4, 1), nil)
 	m.term = term
 
 	readSlave := func() string {
