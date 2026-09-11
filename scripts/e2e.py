@@ -263,19 +263,6 @@ def drag_copies_selection_via_osc52(s):
     assert len(auto) > before, "drag release did not emit an OSC 52 copy"
     assert b"\n" in auto[-1], "selected text should span at least two lines"
 
-    # the selection resets on release, so `y` right after is a no-op
-    s.send(b"y"); time.sleep(0.05)
-    s.drain(0.8)
-    assert len(payloads()) == len(auto), "y copied after the selection was reset on release"
-
-    # a plain click clears the (already reset) selection; y must stay a no-op
-    s.send(b"\x1b[<0;15;22M"); time.sleep(0.05)
-    s.send(b"\x1b[<0;15;22m"); s.drain(0.8)
-    cnt = len(payloads())
-    s.send(b"y"); time.sleep(0.05)
-    s.drain(0.8)
-    assert len(payloads()) == cnt, "y copied with no active selection"
-
 
 @check
 def info_drag_selects_and_copies(s):

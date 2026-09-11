@@ -1949,35 +1949,6 @@ func TestLogReleaseAutoCopiesSelection(tt *testing.T) {
 	}
 }
 
-func TestCopyKeyCopiesFinalizedSelection(tt *testing.T) {
-	m := logTestModel()
-	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 15})
-	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 16})
-	// a lost release (timeout) keeps the selection active so y can copy it
-	next, _ = testUpdate(next, dragTimeoutMsg{gen: next.dragGen})
-	if !next.logSel.active {
-		tt.Fatal("timed-out drag should keep an active selection for a manual copy")
-	}
-	keyY := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")}
-	if _, cmd := testUpdate(next, keyY); cmd == nil {
-		tt.Error("y with an active selection should return a copy command")
-	}
-	next.logSel = textSel{}
-	if _, cmd := testUpdate(next, keyY); cmd != nil {
-		tt.Error("y without a selection should return no command")
-	}
-	// a completed drag resets immediately: y right after must be a no-op
-	next2 := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 15})
-	next2 = testMouseUpdate(next2, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 16})
-	next2 = testMouseUpdate(next2, tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 4, Y: 16})
-	if next2.logSel.active {
-		tt.Fatal("completed drag should have cleared the selection")
-	}
-	if _, cmd := testUpdate(next2, keyY); cmd != nil {
-		tt.Error("y after a completed drag must not copy (selection reset)")
-	}
-}
-
 func TestLogSelectionReanchorCellBoundaries(tt *testing.T) {
 	sels, ok := reanchorSelection("a\nbcde", textSel{active: true, anR: 1, anC: 1, endR: 1, endC: 3}, "x\na\nbcde")
 	if !ok {
@@ -2125,6 +2096,92 @@ func TestHelpBarShowsTerminalBadge(tt *testing.T) {
 	})
 }
 
+func TestHelpBarPerTab(tt *testing.T) {
+	withTrueColor(tt, func() {
+		m := detailTestModel()
+		// Containers Info
+		m.activeTab = tabContainers
+		m.activeSubTab = subTabInfo
+		bar := stripANSI(m.renderHelpBar())
+		if !strings.Contains(bar, "←/→ Logs") || !strings.Contains(bar, "e exec") {
+			tt.Errorf("containers info bar wrong: %q", bar)
+		}
+		// Containers Logs
+		m.activeSubTab = subTabLogs
+		bar = stripANSI(m.renderHelpBar())
+		if !strings.Contains(bar, "←/→ Info") || !strings.Contains(bar, "f follow") {
+			tt.Errorf("containers logs bar wrong: %q", bar)
+		}
+		// Images
+		m.activeTab = tabImages
+		bar = stripANSI(m.renderHelpBar())
+		if !strings.Contains(bar, "a all") {
+			tt.Errorf("images bar wrong: %q", bar)
+		}
+		// Volumes
+		m.activeTab = tabVolumes
+		bar = stripANSI(m.renderHelpBar())
+		if !strings.Contains(bar, "1-5 tabs") {
+			tt.Errorf("volumes bar wrong: %q", bar)
+		}
+		// Projects
+		m.activeTab = tabCompose
+		bar = stripANSI(m.renderHelpBar())
+		if !strings.Contains(bar, "Space expand") {
+			tt.Errorf("projects bar wrong: %q", bar)
+		}
+		// Every tab always shows these
+		for _, t2 := range []tab{tabContainers, tabImages, tabVolumes, tabNetworks, tabCompose} {
+			m.activeTab = t2
+			raw := m.renderHelpBar()
+			bar := stripANSI(raw)
+			if !strings.Contains(bar, "x menu") {
+				tt.Errorf("tab %d missing x/? hints: %q", t2, bar)
+			}
+			// key bindings are highlighted in the bright foreground tone
+			if !strings.Contains(raw, "38;2;230;237;243") { // t.Foreground = #e6edf3
+				tt.Errorf("tab %d help bar missing foreground key highlight: %q", t2, raw)
+			}
+		}
+	})
+}
+
+func TestHelpBarShowsMenuBanner(tt *testing.T) {
+	withTrueColor(tt, func() {
+		m := detailTestModel()
+		m.menuOpen = true
+		m.menu.header = "Actions for container redis"
+
+		// renderHelpBarSegment is what View() joins in: it must NOT add the
+		// app margin, so the amber strip begins at the very first column. The
+		// old bug emitted a standalone "Surface m" cell before the bar.
+		raw := m.renderHelpBarSegment()
+		bar := stripANSI(raw)
+		if n := len(strings.Split(bar, "\n")); n != 1 {
+			tt.Fatalf("menu help bar rows = %d, want 1: %q", n, bar)
+		}
+		if strings.HasPrefix(raw, "\x1b[48;2;22;27;34m \x1b[0m") {
+			tt.Errorf("amber strip must start at column 0, no leading surface margin cell: %q", raw[:min(60, len(raw))])
+		}
+		if !strings.Contains(bar, "Actions for container redis") {
+			tt.Errorf("menu header missing, got %q", bar)
+		}
+		if !strings.Contains(bar, "esc close") {
+			tt.Errorf("close hint missing, got %q", bar)
+		}
+		if strings.Contains(bar, "1-5 tabs") || strings.Contains(bar, "? help") {
+			tt.Errorf("regular key hints must be hidden, got %q", bar)
+		}
+		// amber bg + surface bg
+		if !strings.Contains(raw, "48;2;210;153;34") {
+			tt.Errorf("amber bg missing, got %q", raw)
+		}
+		if !strings.Contains(raw, "48;2;22;27;34") {
+			tt.Errorf("surface bg missing, got %q", raw)
+		}
+	})
+}
+
 // TestLogDragTimeoutFinalizes does the manual release never arrive
 // (lost focus / drag ended outside the terminal), a stale in-flight drag
 // must be snapped into a final selection WITHOUT auto-copying.
@@ -2231,29 +2288,6 @@ func TestCopyToastArmedOnRelease(tt *testing.T) {
 	// the matching expiry timer hides it
 	if expired, _ := testUpdate(released, copyToastMsg{gen: released.copyToastGen}); expired.copyToast {
 		tt.Error("matching copyToastMsg should clear the toast")
-	}
-}
-
-func TestCopyToastViaCopyKey(tt *testing.T) {
-	m := logTestModel()
-	next := testMouseUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: 1, Y: 15})
-	next = testMouseUpdate(next, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionMotion, X: 4, Y: 16})
-	// lost release (timeout) keeps the selection active for a manual copy
-	next, _ = testUpdate(next, dragTimeoutMsg{gen: next.dragGen})
-	if !next.logSel.active {
-		tt.Fatal("timed-out drag should keep an active selection")
-	}
-	keyY := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")}
-	copied, cmd := testUpdate(next, keyY)
-	if cmd == nil {
-		tt.Fatal("y with an active selection should copy")
-	}
-	if !copied.copyToast {
-		tt.Error("copy key should arm the copied-toast badge")
-	}
-	// y without a selection neither copies nor arms the toast
-	if noop, noCmd := testUpdate(logTestModel(), keyY); noCmd != nil || noop.copyToast {
-		tt.Error("y without a selection must neither copy nor arm the toast")
 	}
 }
 

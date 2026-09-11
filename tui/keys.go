@@ -13,7 +13,6 @@ type keyMap struct {
 	StartStop key.Binding
 	Restart   key.Binding
 	Follow    key.Binding
-	Copy      key.Binding
 	One       key.Binding
 	Two       key.Binding
 	Three     key.Binding
@@ -68,10 +67,6 @@ var keys = keyMap{
 		key.WithKeys("f"),
 		key.WithHelp("f", "follow logs"),
 	),
-	Copy: key.NewBinding(
-		key.WithKeys("y"),
-		key.WithHelp("y", "copy selection"),
-	),
 	One: key.NewBinding(
 		key.WithKeys("1"),
 		key.WithHelp("1", "containers"),
@@ -121,7 +116,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.Up, k.Down, k.Menu, k.Follow, k.Copy, k.Select},
+		{k.Up, k.Down, k.Menu, k.Follow, k.Select},
 		{k.StartStop, k.Restart, k.ToggleAll, k.Exec, k.Attach},
 		{k.Back, k.Help, k.Quit},
 	}

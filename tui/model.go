@@ -378,19 +378,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logFollow = !m.logFollow
 			}
 			return m, nil
-		case key.Matches(msg, keys.Copy):
-			if m.activeTab == tabContainers {
-				switch m.activeSubTab {
-				case subTabLogs:
-					if m.logSel.active {
-						return m, tea.Batch(osc52Copy(m.selectionText()), m.armCopyToast())
-					}
-				case subTabInfo:
-					if m.detailSel.active {
-						return m, tea.Batch(osc52Copy(selectedText(m.detailContent, m.detailSel)), m.armCopyToast())
-					}
-				}
-			}
 		case key.Matches(msg, keys.Back):
 			if m.activeTab == tabContainers {
 				switch m.activeSubTab {
@@ -872,8 +859,11 @@ func (m Model) View() string {
 // ---- render helpers ----
 
 // renderHelpBarSegment yields the help bar row ready to be joined into View().
+// While the floating terminal or the context menu is open the bar renders
+// itself full-width so its amber strip can begin at the very first column;
+// otherwise it carries the app margin to match the content above.
 func (m Model) renderHelpBarSegment() string {
-	if m.term != nil {
+	if m.term != nil || m.menuOpen {
 		return m.renderHelpBar()
 	}
 	return lipgloss.NewStyle().Background(t.Surface).Padding(0, appMarginX).Render(m.renderHelpBar())
@@ -916,14 +906,52 @@ func (m Model) renderHelpBar() string {
 		row := amber.Render(" "+title+" ") + actionStr
 		return lipgloss.NewStyle().Background(t.Surface).Width(m.width).Render(row)
 	}
+	if m.menuOpen {
+		action := "↑/↓ navigate • enter select • esc close"
+		available := m.width - 3
+		if available < 1 {
+			available = 1
+		}
+		actionW := len(action)
+		if actionW >= available {
+			actionW = 0
+		}
+		titleW := max(1, available-actionW)
+		title := fitRunes(m.menu.header, titleW)
+		amber := lipgloss.NewStyle().Background(t.Warning).Foreground(t.Background).Bold(true)
+		hintStyle := lipgloss.NewStyle().Background(t.Surface).Foreground(t.Muted)
+		var actionStr string
+		if actionW > 0 {
+			actionStr = hintStyle.Render(" ") + renderHelpHints(fitRunes(action, actionW))
+		}
+		row := amber.Render(" "+title+" ") + actionStr
+		return lipgloss.NewStyle().Background(t.Surface).Width(m.width).Render(row)
+	}
 	if m.helpOn {
 		return HelpBarStyle.Width(cw).Render(fitRunes(m.help.View(keys), inner))
 	}
-	// Short enough that the bar never wraps to a second row: a wrapped help
-	// bar makes View() one line taller than the terminal, scrolling every
-	// visible row up by one and desyncing mouse coordinates from selection.
-	h := " 1-4 tabs • ↑/↓ navigate • ←/→ Info/Logs • Space start/stop • r restart • a all • y copy • ? help • Shift+drag select"
-	return HelpBarStyle.Width(cw).Render(fitRunes(h, inner))
+	return HelpBarStyle.Width(cw).Render(renderHelpHints(fitRunes(m.helpText(), inner)))
+}
+
+// renderHelpHints paints each leading key binding ("1-5", "↑/↓", "Space", …)
+// of a " • "-separated hint row in the bright foreground so the eye can pick
+// the keys off the bar, leaving the description text in the muted bar tone.
+func renderHelpHints(s string) string {
+	keyStyle := lipgloss.NewStyle().Background(t.Surface).Foreground(t.Foreground)
+	descStyle := lipgloss.NewStyle().Background(t.Surface).Foreground(t.Muted)
+	var b strings.Builder
+	for i, seg := range strings.Split(s, " • ") {
+		if i > 0 {
+			b.WriteString(descStyle.Render(" • "))
+		}
+		if k, d, ok := strings.Cut(seg, " "); ok {
+			b.WriteString(keyStyle.Render(k))
+			b.WriteString(descStyle.Render(" " + d))
+		} else {
+			b.WriteString(keyStyle.Render(seg))
+		}
+	}
+	return b.String()
 }
 
 // fitRunes trims s to at most max runes, ending with an ellipsis.
@@ -936,6 +964,29 @@ func fitRunes(s string, max int) string {
 		return "…"
 	}
 	return string(r[:max-1]) + "…"
+}
+
+// helpText returns the one-line key-hint bar for the current tab.
+func (m Model) helpText() string {
+	const tabs = "1-5 tabs • ↑/↓ navigate"
+	switch m.activeTab {
+	case tabContainers:
+		core := tabs + " • ←/→ Logs • Space start/stop • r restart • a all • e exec • t attach"
+		if m.activeSubTab == subTabLogs {
+			core = tabs + " • ←/→ Info • Space start/stop • r restart • f follow"
+		}
+		return core + " • x menu"
+	case tabImages:
+		return tabs + " • a all • x menu"
+	case tabVolumes:
+		return tabs + " • x menu"
+	case tabNetworks:
+		return tabs + " • x menu"
+	case tabCompose:
+		return tabs + " • Space expand • x menu"
+	default:
+		return tabs + " • x menu"
+	}
 }
 
 // tabBarItems is the single source of truth for the global tab strip: it
@@ -1993,12 +2044,6 @@ func osc52CopyText(content string, sel textSel) tea.Cmd {
 	}
 	sel.active = true // selectedText only yields text for an active span
 	return osc52Copy(selectedText(content, sel))
-}
-
-// selectionText returns the plain (ANSI-stripped) text currently selected in
-// the Logs pane.
-func (m Model) selectionText() string {
-	return selectedText(m.containerLogContent, m.logSel)
 }
 
 // osc52Copy returns a Cmd that writes payload to the terminal clipboard using
