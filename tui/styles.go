@@ -79,6 +79,13 @@ var MenuTitleStyle = lipgloss.NewStyle().
 	Background(t.Surface).
 	Foreground(lipgloss.Color("#f0883e"))
 
+// HelpHintActiveStyle paints a help-bar key as an engaged-action pill, reusing
+// the active-tab green so it reads as "this action is currently on". It has no
+// extra padding or bold so the hint row keeps its exact width budget.
+var HelpHintActiveStyle = lipgloss.NewStyle().
+	Background(lipgloss.Color("#2ea043")).
+	Foreground(t.Background)
+
 var (
 	BaseStyle = lipgloss.NewStyle().
 			Background(t.Background).

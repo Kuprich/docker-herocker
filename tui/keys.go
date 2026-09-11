@@ -53,7 +53,7 @@ var keys = keyMap{
 	),
 	ToggleAll: key.NewBinding(
 		key.WithKeys("a"),
-		key.WithHelp("a", "show all/active"),
+		key.WithHelp("a", "filter statuses"),
 	),
 	StartStop: key.NewBinding(
 		key.WithKeys(" "),

@@ -2106,6 +2106,9 @@ func TestHelpBarPerTab(tt *testing.T) {
 		if !strings.Contains(bar, "←/→ Logs") || !strings.Contains(bar, "e exec") {
 			tt.Errorf("containers info bar wrong: %q", bar)
 		}
+		if !strings.Contains(bar, "a filter") || strings.Contains(bar, "a all") {
+			tt.Errorf("containers info bar must advertise the status filter: %q", bar)
+		}
 		// Containers Logs
 		m.activeSubTab = subTabLogs
 		bar = stripANSI(m.renderHelpBar())
@@ -2127,7 +2130,7 @@ func TestHelpBarPerTab(tt *testing.T) {
 		// Projects
 		m.activeTab = tabCompose
 		bar = stripANSI(m.renderHelpBar())
-		if !strings.Contains(bar, "Space expand") {
+		if !strings.Contains(bar, "Space expand") || !strings.Contains(bar, "a filter") {
 			tt.Errorf("projects bar wrong: %q", bar)
 		}
 		// Every tab always shows these
@@ -2142,6 +2145,66 @@ func TestHelpBarPerTab(tt *testing.T) {
 			if !strings.Contains(raw, "38;2;230;237;243") { // t.Foreground = #e6edf3
 				tt.Errorf("tab %d help bar missing foreground key highlight: %q", t2, raw)
 			}
+		}
+	})
+}
+
+func TestHelpBarHighlightsActiveFilter(tt *testing.T) {
+	withTrueColor(tt, func() {
+		pill := "48;2;46;160;67" // #2ea043, the engaged-action pill background (merged into the key SGR)
+
+		// A narrowed filter turns the "a filter" inscription into a single
+		// green pill (key + description as one styled unit) on the containers
+		// and projects tabs.
+		for _, tab := range []tab{tabContainers, tabCompose} {
+			m := detailTestModel()
+			m.activeTab = tab
+			m.statusFilter = []string{"running"}
+			raw := m.renderHelpBar()
+			if !strings.Contains(raw, pill) {
+				tt.Errorf("tab %d: active filter must pill the a key, got %q", tab, raw[:min(120, len(raw))])
+			}
+			if !strings.Contains(stripANSI(raw), "a filter") {
+				tt.Errorf("tab %d: pill must sit on the a filter hint", tab)
+			}
+			// The whole "a filter" pair is one styled unit with a single pad
+			// space on each side: the reset clears right after the trailing
+			// space, so nothing re-paints part of it muted.
+			if !strings.Contains(raw, "m a filter \x1b[0m") {
+				tt.Errorf("tab %d: the whole a filter inscription must be pilled, got %q", tab, raw[:min(160, len(raw))])
+			}
+		}
+
+		// An empty filter (everything cleared) is "not all selected" too.
+		m := detailTestModel()
+		m.activeTab = tabContainers
+		m.statusFilter = nil
+		if raw := m.renderHelpBar(); !strings.Contains(raw, pill) {
+			tt.Error("empty filter must keep the a key pill-lit")
+		}
+
+		// The full status set (the default) renders the plain white key.
+		m = detailTestModel()
+		m.activeTab = tabContainers
+		if raw := m.renderHelpBar(); strings.Contains(raw, pill) {
+			tt.Error("full filter must not pill the a key")
+		}
+
+		// The images "a all" toggle is unrelated: it never picks up the pill.
+		m = detailTestModel()
+		m.activeTab = tabImages
+		m.statusFilter = []string{"exited"}
+		if raw := m.renderHelpBar(); strings.Contains(raw, pill) {
+			tt.Error("images a all must never be pill-lit")
+		}
+
+		// The picker banner shows its own hints without the pill.
+		m = detailTestModel()
+		m.activeTab = tabContainers
+		m.statusOpen = true
+		m.statusFilter = []string{"running"}
+		if raw := m.renderHelpBar(); strings.Contains(raw, pill) {
+			tt.Error("picker banner hints must not carry the pill")
 		}
 	})
 }
@@ -4499,4 +4562,180 @@ func TestExecAttachGating(tt *testing.T) {
 	if m.term != nil {
 		tt.Fatal("pressing e must not open the float synchronously (cmd starts it)")
 	}
+}
+
+// keyRune sends a plain rune like the terminal would.
+func keyRune(r rune) tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}
+}
+
+func TestStatusPickerOpensAndCloses(tt *testing.T) {
+	m := detailTestModel()
+	m.imagesAll = false
+
+	// On the containers tab "a" opens the picker window, no refresh needed.
+	next, cmd := testUpdate(m, keyRune('a'))
+	if !next.statusOpen {
+		tt.Fatal("a on the containers tab must open the status picker")
+	}
+	if cmd != nil {
+		tt.Fatal("opening the picker must not dispatch a refresh")
+	}
+	if m.statusOpen {
+		tt.Fatal("model must not be mutated before Update returns")
+	}
+
+	// Esc closes it, leaving the filter untouched.
+	next, cmd = testUpdate(next, tea.KeyMsg{Type: tea.KeyEsc})
+	if next.statusOpen {
+		tt.Fatal("esc must close the status picker")
+	}
+	if cmd != nil {
+		tt.Fatal("merely closing the picker must not dispatch a command")
+	}
+
+	// Any other key also dismisses the window.
+	next, _ = testUpdate(detailTestModel(), keyRune('a'))
+	next, cmd = testUpdate(next, keyRune('z'))
+	if next.statusOpen {
+		tt.Fatal("an unknown key must dismiss the status picker")
+	}
+	if cmd != nil {
+		tt.Fatal("dismissing the picker must not dispatch a command")
+	}
+
+	// On the images tab "a" keeps toggling the all/tagged listing.
+	m = detailTestModel()
+	m.activeTab = tabImages
+	next, cmd = testUpdate(m, keyRune('a'))
+	if next.statusOpen {
+		tt.Fatal("a on the images tab must not open the picker")
+	}
+	if next.imagesAll == m.imagesAll {
+		tt.Fatal("a on the images tab must flip the imagesAll listing")
+	}
+	if cmd == nil {
+		tt.Fatal("images toggle must dispatch a refresh")
+	}
+}
+
+func TestStatusPickerTogglesStatus(tt *testing.T) {
+	m := detailTestModel()
+	next := testMouseUpdate(m, keyRune('a'))
+	if next.statusSel != 0 {
+		tt.Fatalf("picker opens on the first row, got %d", next.statusSel)
+	}
+	if len(next.statusFilter) != len(containerStatuses) {
+		tt.Fatalf("picker must start with every status selected, got %v", next.statusFilter)
+	}
+
+	// Move down to "paused" (row 2) and toggle it off.
+	next = testMouseUpdate(next, keyRune('j'))
+	next = testMouseUpdate(next, keyRune('j'))
+	if next.statusSel != 2 {
+		tt.Fatalf("selection = %d, want row 2 (paused)", next.statusSel)
+	}
+	next, cmd := testUpdate(next, keyRune(' '))
+	if cmd == nil {
+		tt.Fatal("toggling a status must dispatch a refresh")
+	}
+	if next.statusSelected("paused") {
+		tt.Fatal("paused must be removed from the filter after toggling")
+	}
+	if len(next.statusFilter) != len(containerStatuses)-1 {
+		tt.Fatalf("filter size = %d, want %d", len(next.statusFilter), len(containerStatuses)-1)
+	}
+	// The picker stays open so more rows can be toggled.
+	if !next.statusOpen {
+		tt.Fatal("toggling must keep the picker open")
+	}
+
+	// Toggle it back on.
+	next = testMouseUpdate(next, keyRune(' '))
+	if !next.statusSelected("paused") {
+		tt.Fatal("toggling a cleared status again must re-add it")
+	}
+}
+
+func TestStatusPickerSelectAllAndClear(tt *testing.T) {
+	m := detailTestModel()
+	next := testMouseUpdate(m, keyRune('a'))
+
+	// Clear everything first: down to the "Clear" row (the last one).
+	for i := 0; i < statusClearAll; i++ {
+		next = testMouseUpdate(next, keyRune('j'))
+	}
+	if next.statusSel != statusClearAll {
+		tt.Fatalf("selection = %d, want Clear row %d", next.statusSel, statusClearAll)
+	}
+	next, _ = testUpdate(next, keyRune(' '))
+	if len(next.statusFilter) != 0 {
+		tt.Fatalf("Clear must empty the filter, got %v", next.statusFilter)
+	}
+
+	// Select all back: up to the "Select all" row.
+	for i := 0; i < statusClearAll-statusSelectAll; i++ {
+		next = testMouseUpdate(next, keyRune('k'))
+	}
+	if next.statusSel != statusSelectAll {
+		tt.Fatalf("selection = %d, want Select all row %d", next.statusSel, statusSelectAll)
+	}
+	next, _ = testUpdate(next, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("enter")})
+	if len(next.statusFilter) != len(containerStatuses) {
+		tt.Fatalf("Select all must restore every status, got %v", next.statusFilter)
+	}
+}
+
+func TestStatusPickerEscKeepsFilter(tt *testing.T) {
+	m := detailTestModel()
+	next := testMouseUpdate(m, keyRune('a'))
+	next = testMouseUpdate(next, keyRune('j'))
+	next = testMouseUpdate(next, keyRune(' ')) // drop "exited"
+	if next.statusSelected("exited") {
+		tt.Fatal("exited must be dropped before closing")
+	}
+	next = testMouseUpdate(next, tea.KeyMsg{Type: tea.KeyEsc})
+	if next.statusOpen {
+		tt.Fatal("esc must close the picker")
+	}
+	if next.statusSelected("exited") {
+		tt.Fatal("closing the picker must keep the filter (exited still dropped)")
+	}
+}
+
+func TestStatusPickerBannerAndRows(tt *testing.T) {
+	withTrueColor(tt, func() {
+		m := detailTestModel()
+		m.statusOpen = true
+
+		// The amber banner must start at column 0, mirroring the context menu.
+		raw := m.renderHelpBarSegment()
+		bar := stripANSI(raw)
+		if strings.HasPrefix(raw, "\x1b[48;2;22;27;34m \x1b[0m") {
+			tt.Errorf("amber strip must start at column 0: %q", raw[:min(60, len(raw))])
+		}
+		if !strings.Contains(bar, "Filter by status") {
+			tt.Errorf("picker banner missing title: %q", bar)
+		}
+		if !strings.Contains(bar, "space toggle") {
+			tt.Errorf("picker banner missing space hint: %q", bar)
+		}
+
+		// Every status renders as a checkbox row, ordered by containerStatuses.
+		rows := m.renderStatusPicker()
+		wantRows := 2 + 2 + len(containerStatuses) + 1 + 2
+		if len(rows) != wantRows {
+			tt.Fatalf("picker rows = %d, want %d", len(rows), wantRows)
+		}
+		plain := stripANSI(strings.Join(rows, "\n"))
+		if !strings.Contains(plain, "[x] running") {
+			tt.Errorf("running must render checked by default: %q", plain)
+		}
+		if !strings.Contains(plain, "[x] dead") {
+			tt.Errorf("dead must render checked by default: %q", plain)
+		}
+		if !strings.Contains(plain, "Select all") || !strings.Contains(plain, "Clear") {
+			tt.Errorf("picker missing the Select all / Clear rows: %q", plain)
+		}
+	})
 }

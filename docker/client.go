@@ -122,8 +122,24 @@ func NewClient() (*Client, error) {
 	return &Client{cli: c}, nil
 }
 
-func (c *Client) ListContainers(all bool) ([]Container, error) {
-	res, err := c.cli.ContainerList(context.Background(), mclient.ContainerListOptions{All: all})
+// containerListOptions builds the request options for a container listing.
+// statuses lists the docker container states ("running", "exited", …) the
+// caller wants to keep; an empty list means no status restriction and all is
+// honoured as before. The docker "status" filter is OR-combined by the API,
+// so several states still form a plain union.
+func containerListOptions(all bool, statuses []string) mclient.ContainerListOptions {
+	opts := mclient.ContainerListOptions{All: all}
+	if len(statuses) > 0 {
+		opts.Filters = make(mclient.Filters).Add("status", statuses...)
+	}
+	return opts
+}
+
+// ListContainers lists the containers on the host. statuses narrows the
+// result to the given docker lifecycle states; when it is empty the listing
+// falls back to all (all=false shows only running/paused containers).
+func (c *Client) ListContainers(all bool, statuses []string) ([]Container, error) {
+	res, err := c.cli.ContainerList(context.Background(), containerListOptions(all, statuses))
 	if err != nil {
 		return nil, err
 	}
@@ -481,10 +497,12 @@ type ComposeProject struct {
 }
 
 // ListComposeProjects groups all containers by their com.docker.compose.project
-// label and returns one ComposeProject per project name. Containers without the
-// label are ignored; empty results yield an empty slice (never nil).
-func (c *Client) ListComposeProjects(all bool) ([]ComposeProject, error) {
-	containers, err := c.ListContainers(all)
+// label and returns one ComposeProject per project name; statuses is forwarded
+// to ListContainers so the tree only reflects the filtered container states.
+// Containers without the label are ignored; empty results yield an empty slice
+// (never nil).
+func (c *Client) ListComposeProjects(all bool, statuses []string) ([]ComposeProject, error) {
+	containers, err := c.ListContainers(all, statuses)
 	if err != nil {
 		return nil, err
 	}

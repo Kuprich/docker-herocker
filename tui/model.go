@@ -32,6 +32,19 @@ const (
 	tabCompose
 )
 
+// containerStatuses is the full set of docker container lifecycle states the
+// status picker offers; the order fixes both the picker rows and the filter
+// values sent to the docker "status" filter.
+var containerStatuses = []string{"running", "exited", "paused", "created", "restarting", "removing", "dead"}
+
+// statusRows is the number of selectable picker rows: one per status plus the
+// "Select all" and "Clear" actions, separated by a divider before the actions.
+var (
+	statusSelectAll = len(containerStatuses)     // picker row index of "Select all"
+	statusClearAll  = len(containerStatuses) + 1 // picker row index of "Clear"
+	statusRowCount  = len(containerStatuses) + 2 // total selectable rows
+)
+
 type containerMsg []docker.Container
 type imageMsg []docker.Image
 type volumeMsg []docker.Volume
@@ -140,7 +153,7 @@ type Model struct {
 	compose     []docker.ComposeProject
 	selectedIdx int
 	activeTab   tab
-	showAll     bool
+	imagesAll   bool // images list includes dangling/special images
 	loading     bool
 	err         error
 
@@ -190,6 +203,14 @@ type Model struct {
 
 	menu     popupMenu // container right-click context menu
 	menuOpen bool      // the popup is on screen and consumes input
+
+	// statusFilter holds the container states the list should show; nil or
+	// empty means nothing is displayed. It is controlled from the status
+	// picker window (statusOpen), which offers every docker lifecycle state
+	// plus a "Select all" / "Clear" pair.
+	statusFilter []string
+	statusOpen   bool // status picker window is open and consumes input
+	statusSel    int  // highlighted picker row (0..statusRows-1)
 }
 
 func New(dcli *docker.Client) Model {
@@ -200,7 +221,8 @@ func New(dcli *docker.Client) Model {
 		docker:          dcli,
 		spinner:         s,
 		help:            help.New(),
-		showAll:         true,
+		imagesAll:       true,
+		statusFilter:    append([]string(nil), containerStatuses...),
 		logFollow:       true,
 		selectedIdx:     0,
 		stats:           map[string]docker.Stats{},
@@ -315,6 +337,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return next, cmd
 			}
 		}
+		// Status picker mirrors the context menu: it owns the navigation and
+		// toggle keys while open; Quit falls through so ctrl+c/q still exits.
+		if m.statusOpen {
+			if next, cmd, handled := m.handleStatusKey(msg); handled {
+				return next, cmd
+			}
+		}
 		switch {
 		case key.Matches(msg, keys.Quit):
 			return m, tea.Quit
@@ -363,8 +392,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.openContextMenu()
 			return m, nil
 		case key.Matches(msg, keys.ToggleAll):
-			m.showAll = !m.showAll
-			return m, m.refreshNow()
+			// On the images tab "a" toggles between all images and tagged
+			// ones only; on the containers/projects tabs it opens the status
+			// picker window instead of a binary all/active toggle.
+			switch m.activeTab {
+			case tabImages:
+				m.imagesAll = !m.imagesAll
+				return m, m.refreshNow()
+			case tabContainers, tabCompose:
+				if m.activeTab != tabContainers || m.activeSubTab == subTabInfo {
+					m.openStatusPicker()
+				}
+			}
+			return m, nil
 		case key.Matches(msg, keys.StartStop):
 			if m.activeTab == tabCompose {
 				m.toggleComposeExpanded()
@@ -693,6 +733,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.menuOpen {
 			return m.handleMenuMouse(msg)
 		}
+		// Status picker mirrors the context menu: a click on a row toggles it,
+		// anything else drops the window.
+		if m.statusOpen {
+			return m.handleStatusMouse(msg)
+		}
 
 		// Logs pane: the left button drags an app-owned text selection over
 		// the log body (reжим A). It is anchored in buffer coordinates so it
@@ -850,6 +895,9 @@ func (m Model) View() string {
 	if m.menuOpen {
 		content = m.splicePopup(content)
 	}
+	if m.statusOpen {
+		content = m.spliceStatusPicker(content)
+	}
 	if m.term != nil {
 		content = m.spliceTerminal(content)
 	}
@@ -863,7 +911,7 @@ func (m Model) View() string {
 // itself full-width so its amber strip can begin at the very first column;
 // otherwise it carries the app margin to match the content above.
 func (m Model) renderHelpBarSegment() string {
-	if m.term != nil || m.menuOpen {
+	if m.term != nil || m.menuOpen || m.statusOpen {
 		return m.renderHelpBar()
 	}
 	return lipgloss.NewStyle().Background(t.Surface).Padding(0, appMarginX).Render(m.renderHelpBar())
@@ -922,7 +970,28 @@ func (m Model) renderHelpBar() string {
 		hintStyle := lipgloss.NewStyle().Background(t.Surface).Foreground(t.Muted)
 		var actionStr string
 		if actionW > 0 {
-			actionStr = hintStyle.Render(" ") + renderHelpHints(fitRunes(action, actionW))
+			actionStr = hintStyle.Render(" ") + renderHelpHints(fitRunes(action, actionW), "")
+		}
+		row := amber.Render(" "+title+" ") + actionStr
+		return lipgloss.NewStyle().Background(t.Surface).Width(m.width).Render(row)
+	}
+	if m.statusOpen {
+		action := "↑/↓ navigate • space toggle • esc close"
+		available := m.width - 3
+		if available < 1 {
+			available = 1
+		}
+		actionW := len(action)
+		if actionW >= available {
+			actionW = 0
+		}
+		titleW := max(1, available-actionW)
+		title := fitRunes("Filter by status", titleW)
+		amber := lipgloss.NewStyle().Background(t.Warning).Foreground(t.Background).Bold(true)
+		hintStyle := lipgloss.NewStyle().Background(t.Surface).Foreground(t.Muted)
+		var actionStr string
+		if actionW > 0 {
+			actionStr = hintStyle.Render(" ") + renderHelpHints(fitRunes(action, actionW), "")
 		}
 		row := amber.Render(" "+title+" ") + actionStr
 		return lipgloss.NewStyle().Background(t.Surface).Width(m.width).Render(row)
@@ -930,13 +999,36 @@ func (m Model) renderHelpBar() string {
 	if m.helpOn {
 		return HelpBarStyle.Width(cw).Render(fitRunes(m.help.View(keys), inner))
 	}
-	return HelpBarStyle.Width(cw).Render(renderHelpHints(fitRunes(m.helpText(), inner)))
+	// The "a filter" key lights up as a pill while the status picker has
+	// narrowed the container list below the full status set.
+	highlightKey := ""
+	if (m.activeTab == tabContainers && m.activeSubTab == subTabInfo) || m.activeTab == tabCompose {
+		if m.statusFilterActive() {
+			highlightKey = "a"
+		}
+	}
+	// The pill carries one cell of padding on each side; shrink the fit budget
+	// by those two cells so the total row keeps its exact bar width.
+	budget := inner
+	if highlightKey != "" {
+		budget = max(inner-2, 1)
+	}
+	return HelpBarStyle.Width(cw).Render(renderHelpHints(fitRunes(m.helpText(), budget), highlightKey))
+}
+
+// statusFilterActive reports whether the status picker has narrowed the
+// container list below the full set of states — i.e. the "a filter" hint on
+// the bar describes a real, non-trivial filter.
+func (m Model) statusFilterActive() bool {
+	return len(m.statusFilter) < len(containerStatuses)
 }
 
 // renderHelpHints paints each leading key binding ("1-5", "↑/↓", "Space", …)
 // of a " • "-separated hint row in the bright foreground so the eye can pick
 // the keys off the bar, leaving the description text in the muted bar tone.
-func renderHelpHints(s string) string {
+// A key equal to highlightKey is painted as an engaged-action pill instead of
+// the plain bright foreground.
+func renderHelpHints(s string, highlightKey string) string {
 	keyStyle := lipgloss.NewStyle().Background(t.Surface).Foreground(t.Foreground)
 	descStyle := lipgloss.NewStyle().Background(t.Surface).Foreground(t.Muted)
 	var b strings.Builder
@@ -945,8 +1037,16 @@ func renderHelpHints(s string) string {
 			b.WriteString(descStyle.Render(" • "))
 		}
 		if k, d, ok := strings.Cut(seg, " "); ok {
-			b.WriteString(keyStyle.Render(k))
-			b.WriteString(descStyle.Render(" " + d))
+			if k == highlightKey {
+				// The whole "key description" pair glows as one pill, not
+				// just the key letter, so the engaged action reads as a unit.
+				// One cell of breathing room on each side keeps the filled
+				// area from touching its neighbours.
+				b.WriteString(HelpHintActiveStyle.Render(" " + k + " " + d + " "))
+			} else {
+				b.WriteString(keyStyle.Render(k))
+				b.WriteString(descStyle.Render(" " + d))
+			}
 		} else {
 			b.WriteString(keyStyle.Render(seg))
 		}
@@ -971,7 +1071,7 @@ func (m Model) helpText() string {
 	const tabs = "1-5 tabs • ↑/↓ navigate"
 	switch m.activeTab {
 	case tabContainers:
-		core := tabs + " • ←/→ Logs • Space start/stop • r restart • a all • e exec • t attach"
+		core := tabs + " • ←/→ Logs • Space start/stop • r restart • a filter • e exec • t attach"
 		if m.activeSubTab == subTabLogs {
 			core = tabs + " • ←/→ Info • Space start/stop • r restart • f follow"
 		}
@@ -983,7 +1083,7 @@ func (m Model) helpText() string {
 	case tabNetworks:
 		return tabs + " • x menu"
 	case tabCompose:
-		return tabs + " • Space expand • x menu"
+		return tabs + " • Space expand • a filter • x menu"
 	default:
 		return tabs + " • x menu"
 	}
@@ -2924,7 +3024,7 @@ func (m Model) refreshNow() tea.Cmd {
 	return func() tea.Msg {
 		switch m.activeTab {
 		case tabImages:
-			images, err := m.docker.ListImages(m.showAll)
+			images, err := m.docker.ListImages(m.imagesAll)
 			if err != nil {
 				return errMsg{err}
 			}
@@ -2948,13 +3048,22 @@ func (m Model) refreshNow() tea.Cmd {
 			})
 			return networkMsg(networks)
 		case tabCompose:
-			projects, err := m.docker.ListComposeProjects(m.showAll)
+			// An empty status filter means the user cleared the picker:
+			// nothing matches, so the tree is empty rather than degenerating
+			// into docker's "no status filter" catch-all listing.
+			if len(m.statusFilter) == 0 {
+				return composeMsg(nil)
+			}
+			projects, err := m.docker.ListComposeProjects(true, m.statusFilter)
 			if err != nil {
 				return errMsg{err}
 			}
 			return composeMsg(projects)
 		default:
-			containers, err := m.docker.ListContainers(m.showAll)
+			if len(m.statusFilter) == 0 {
+				return containerMsg(nil)
+			}
+			containers, err := m.docker.ListContainers(true, m.statusFilter)
 			if err != nil {
 				return errMsg{err}
 			}
