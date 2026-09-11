@@ -2074,6 +2074,57 @@ func TestViewHeightMatchesTerminal(tt *testing.T) {
 	})
 }
 
+// TestHelpBarShowsTerminalBadge guards the "terminal open" status in the bottom
+// bar: while a container terminal is active the session command is shown on an
+// amber strip that starts at the very first column and ends at the command,
+// while the close hint sits on the regular bar background. The regular key
+// hints are completely hidden and the bar must stay a single line.
+func TestHelpBarShowsTerminalBadge(tt *testing.T) {
+	withTrueColor(tt, func() {
+		m := detailTestModel()
+		m.term = &termFloat{args: []string{"exec", "-it", "web", "sh"}}
+
+		raw := m.renderHelpBar()
+		bar := stripANSI(raw)
+		if n := len(strings.Split(bar, "\n")); n != 1 {
+			tt.Fatalf("help bar rows = %d, want 1: %q", n, bar)
+		}
+		if !strings.Contains(bar, "docker exec -it web sh") {
+			tt.Errorf("session command must be on the bar, got %q", bar)
+		}
+		if !strings.Contains(bar, "exit or Ctrl+D") {
+			tt.Errorf("close hint missing, got %q", bar)
+		}
+		if strings.Contains(bar, "? help") || strings.Contains(bar, "↑/↓") {
+			tt.Errorf("regular key hints must be hidden, got %q", bar)
+		}
+		// amber covers the command region; Surface covers the hint.
+		if !strings.Contains(raw, "48;2;210;153;34") {
+			tt.Errorf("amber bg missing, got %q", raw)
+		}
+		if !strings.Contains(raw, "48;2;22;27;34") {
+			tt.Errorf("surface bg missing, got %q", raw)
+		}
+
+		// attach sessions hint the detach sequence
+		m.term.args = []string{"attach", "--sig-proxy=false", "web"}
+		if bar = stripANSI(m.renderHelpBar()); !strings.Contains(bar, "Ctrl+P Ctrl+Q") {
+			tt.Errorf("attach hint missing, got %q", bar)
+		}
+
+		// narrow terminal: the bar stays one line and shows the amber pill
+		m.term.args = []string{"exec", "-it", "web", "sh"}
+		m.width = 20
+		raw = m.renderHelpBar()
+		if n := len(strings.Split(stripANSI(raw), "\n")); n != 1 {
+			tt.Errorf("narrow help bar rows = %d, want 1", n)
+		}
+		if !strings.Contains(raw, "48;2;210;153;34") {
+			tt.Errorf("narrow bar must still have amber, got %q", raw)
+		}
+	})
+}
+
 // TestLogDragTimeoutFinalizes does the manual release never arrive
 // (lost focus / drag ended outside the terminal), a stale in-flight drag
 // must be snapped into a final selection WITHOUT auto-copying.
@@ -3958,7 +4009,7 @@ func TestTermForwardPgUpSnapsAndAltScreen(t *testing.T) {
 	m := detailTestModel()
 	term := &termFloat{ptmx: ptmx, args: []string{"exec", "-it", "web", "sh"}}
 	term.x, term.y, term.w, term.h = m.termPanelLayout()
-	term.emu = newTermScreen(max(term.w-2*termInset, 1), max(term.h-5, 1), nil)
+	term.emu = newTermScreen(max(term.w-2*termInset, 1), max(term.h-2, 1), nil)
 	m.term = term
 	for i := 1; i <= 30; i++ {
 		term.emu.Feed([]byte(fmt.Sprintf("L%d\r\n", i)))
@@ -4015,7 +4066,7 @@ func TestTermWheelScrollsViewport(t *testing.T) {
 	m := detailTestModel()
 	term := &termFloat{ptmx: ptmx, args: []string{"exec", "-it", "web", "sh"}}
 	term.x, term.y, term.w, term.h = m.termPanelLayout()
-	term.emu = newTermScreen(max(term.w-2*termInset, 1), max(term.h-5, 1), nil)
+	term.emu = newTermScreen(max(term.w-2*termInset, 1), max(term.h-2, 1), nil)
 	m.term = term
 	for i := 1; i <= 30; i++ {
 		term.emu.Feed([]byte(fmt.Sprintf("L%d\r\n", i)))
@@ -4023,9 +4074,8 @@ func TestTermWheelScrollsViewport(t *testing.T) {
 	term.emu.Feed([]byte("> "))
 
 	// magic coords inside the console (bubbletea X/Y are 1-based): the console
-	// starts at (term.x+termInset, term.y+4) below the header, its divider,
-	// the top divider and the padding row.
-	bodyX, bodyY := term.x+termInset+1, term.y+5
+	// starts at (term.x+termInset, term.y+1) below the top padding row.
+	bodyX, bodyY := term.x+termInset+1, term.y+2
 	if _, cmd := testUpdate(m, tea.MouseMsg{Type: tea.MouseWheelUp, Action: tea.MouseActionMotion, X: bodyX, Y: bodyY}); cmd != nil {
 		t.Errorf("wheel must not dispatch app commands, got %T", cmd)
 	}
@@ -4035,12 +4085,12 @@ func TestTermWheelScrollsViewport(t *testing.T) {
 	if _, _ = testUpdate(m, tea.MouseMsg{Type: tea.MouseWheelDown, Action: tea.MouseActionMotion, X: bodyX, Y: bodyY}); term.emu.scrolledUp() {
 		t.Error("wheel down over the body must scroll back to the live view")
 	}
-	// the header/divider/padding area swallows clicks without closing anything
+	// the padding rows swallow clicks without closing anything
 	if _, cmd := testUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: term.x + termInset + 1, Y: term.y + 1}); cmd != nil {
-		t.Errorf("header click must not dispatch commands, got %v", cmd)
+		t.Errorf("padding click must not dispatch commands, got %v", cmd)
 	}
 	if m2, _ := testUpdate(m, tea.MouseMsg{Type: tea.MouseLeft, Action: tea.MouseActionPress, X: term.x + termInset + 1, Y: term.y + 1}); m2.term == nil {
-		t.Error("header click must not tear the session down")
+		t.Error("padding click must not tear the session down")
 	}
 }
 
@@ -4157,12 +4207,12 @@ func TestTermRenderPanelAndSplice(tt *testing.T) {
 	term := &termFloat{args: []string{"exec", "-it", "web", "sh"}}
 	term.x, term.y, term.w, term.h = m.termPanelLayout()
 	term.h = 7
-	term.emu = newTermScreen(max(term.w-2*termInset, 1), max(term.h-5, 1), nil)
+	term.emu = newTermScreen(max(term.w-2*termInset, 1), max(term.h-2, 1), nil)
 	term.append([]byte("root@abc:/#\r\n"))
 	m.term = term
 
 	// lipgloss downgrades to the Ascii profile when stdout is not a TTY;
-	// force TrueColor so the yellow header escape is actually emitted.
+	// force TrueColor so the surface fill escapes are actually emitted.
 	prev := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	tt.Cleanup(func() { lipgloss.SetColorProfile(prev) })
@@ -4176,32 +4226,17 @@ func TestTermRenderPanelAndSplice(tt *testing.T) {
 			tt.Errorf("panel row width = %d, want %d: %q", lipgloss.Width(r), term.w, stripANSI(r))
 		}
 	}
-	header := stripANSI(rows[1])
-	if !strings.Contains(header, "docker exec -it web sh") {
-		tt.Errorf("header = %q, want the docker invocation", header)
+	// row 0 is an empty surface row; there is no header and no divider line
+	// anymore (the session command moved to the bottom help bar).
+	if d := stripANSI(rows[0]); strings.Contains(d, "─") || strings.Contains(d, "docker") {
+		tt.Errorf("top row must be an empty surface row, got %q", d)
 	}
-	if !strings.HasPrefix(header, "  docker") {
-		tt.Errorf("header = %q, want the termInset left padding before the title", header)
+	if got := strings.Join(rows, "\n"); strings.Contains(got, "│┌─└┘") {
+		tt.Errorf("frameless panel leaked border glyphs: %q", got)
 	}
-	// the title is yellow on the surface background
-	if !strings.Contains(rows[1], "38;2;210;153;34") {
-		tt.Errorf("header must be yellow, got %q", rows[1])
-	}
-	if strings.Contains(header, "×") {
-		tt.Error("header must have no close badge after the divider redesign")
-	}
-	if strings.ContainsAny(header, "│┌─└┘") {
-		tt.Errorf("frameless header leaked border glyphs: %q", header)
-	}
-	// the header is boxed between two divider rows
-	for i := 0; i < 3; i += 2 {
-		if d := stripANSI(rows[i]); !strings.Contains(d, "─") {
-			tt.Errorf("divider row %d = %q, want a ─ separator", i, d)
-		}
-	}
-	// the console body is the padded middle region (two dividers, the header,
-	// one padding row top, one padding row bottom)
-	body := stripANSI(strings.Join(rows[4:term.h-1], "\n"))
+	// the console body is the padded middle region (empty top row, the
+	// emulator, one empty padding row at the bottom)
+	body := stripANSI(strings.Join(rows[1:term.h-1], "\n"))
 	if !strings.Contains(body, "root@abc:/#") {
 		tt.Errorf("body = %q, want the shell prompt", body)
 	}
@@ -4209,7 +4244,7 @@ func TestTermRenderPanelAndSplice(tt *testing.T) {
 	// unterminated typed input shows on the cursor row, before Enter
 	term.append([]byte("ls -la"))
 	rows = m.renderTerminalPanel()
-	lb := stripANSI(strings.Join(rows[4:term.h-1], "\n"))
+	lb := stripANSI(strings.Join(rows[1:term.h-1], "\n"))
 	if !strings.Contains(lb, "ls -la") {
 		tt.Errorf("body = %q, want the typed input visible", lb)
 	}
@@ -4225,10 +4260,10 @@ func TestTermRenderPanelAndSplice(tt *testing.T) {
 			tt.Errorf("frame row %d width = %d, want %d", term.y+r, lipgloss.Width(row), m.width)
 		}
 	}
-	// the header text is visible within the spliced frame (row 0 is the top
-	// divider, the header sits below it)
-	if !strings.Contains(stripANSI(frameLines[term.y+1]), "docker exec -it web sh") {
-		tt.Errorf("spliced header row = %q", stripANSI(frameLines[term.y+1]))
+	// the shell prompt is visible within the spliced frame right under the
+	// top padding row
+	if !strings.Contains(stripANSI(frameLines[term.y+1]), "root@abc:/#") {
+		tt.Errorf("spliced console row = %q", stripANSI(frameLines[term.y+1]))
 	}
 }
 
@@ -4246,7 +4281,7 @@ func TestTermForwardAndStream(tt *testing.T) {
 	m := detailTestModel()
 	term := &termFloat{ptmx: ptmx, args: []string{"exec", "-it", "web", "sh"}}
 	term.x, term.y, term.w, term.h = m.termPanelLayout()
-	term.emu = newTermScreen(max(term.w-2*termInset, 1), max(term.h-5, 1), nil)
+	term.emu = newTermScreen(max(term.w-2*termInset, 1), max(term.h-2, 1), nil)
 	m.term = term
 
 	readSlave := func() string {

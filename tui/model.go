@@ -295,7 +295,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.term.resize()
 			if m.term.ptmx != nil {
 				_ = pty.Setsize(m.term.ptmx, &pty.Winsize{
-					Rows: uint16(max(m.term.h-5, 1)),
+					Rows: uint16(max(m.term.h-2, 1)),
 					Cols: uint16(max(m.term.w-2*termInset, 1)),
 				})
 			}
@@ -566,7 +566,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.closeTerminal()
 		m.term = &termFloat{ptmx: msg.ptmx, cmd: msg.cmd, args: msg.args}
 		m.term.x, m.term.y, m.term.w, m.term.h = m.termPanelLayout()
-		m.term.emu = newTermScreen(max(m.term.w-2*termInset, 1), max(m.term.h-5, 1), func(payload string) {
+		m.term.emu = newTermScreen(max(m.term.w-2*termInset, 1), max(m.term.h-2, 1), func(payload string) {
 			if msg.ptmx != nil {
 				_, _ = msg.ptmx.Write([]byte(payload))
 			}
@@ -673,13 +673,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Floating terminal: clicks and wheels inside the console go to the
 		// embedded terminal (program mouse mode when the child enabled it,
-		// scrollback paging otherwise). The header/divider/padding rows around
-		// it are inert but still swallow the event.
+		// scrollback paging otherwise). The padding rows around it are inert
+		// but still swallow the event.
 		if m.term != nil {
 			t := m.term
 			sx, sy := msg.X-1, msg.Y-1
-			if sy >= t.y+4 && sy <= t.y+t.h-2 && sx >= t.x+termInset && sx <= t.x+t.w-1-termInset && t.emu != nil {
-				row := max(min(sy-(t.y+4), t.emu.rows()-1), 0)
+			if sy >= t.y+1 && sy <= t.y+t.h-2 && sx >= t.x+termInset && sx <= t.x+t.w-1-termInset && t.emu != nil {
+				row := max(min(sy-(t.y+1), t.emu.rows()-1), 0)
 				col := max(min(sx-(t.x+termInset), t.emu.cols()-1), 0)
 				switch msg.Type {
 				case tea.MouseWheelUp:
@@ -842,14 +842,14 @@ func (m Model) View() string {
 		return "\n  Initializing…"
 	}
 	content := lipgloss.JoinVertical(lipgloss.Top,
-		m.renderTabBar(),
-		m.renderMain(),
-		m.renderHelpBar(),
+		lipgloss.NewStyle().Background(t.Background).Padding(0, appMarginX).Render(m.renderTabBar()),
+		lipgloss.NewStyle().Background(t.Background).Padding(0, appMarginX).Render(m.renderMain()),
+		// the help bar carries its own margins so the two bottom corner gaps
+		// read as part of the bar (Surface) instead of app Background. With the
+		// floating terminal open the bar renders itself full-width so its amber
+		// command strip can begin at the very first column.
+		m.renderHelpBarSegment(),
 	)
-	content = lipgloss.NewStyle().
-		Background(t.Background).
-		Padding(0, appMarginX).
-		Render(content)
 	content = lipgloss.Place(m.width, m.height,
 		lipgloss.Top, lipgloss.Left,
 		content,
@@ -871,12 +871,50 @@ func (m Model) View() string {
 
 // ---- render helpers ----
 
+// renderHelpBarSegment yields the help bar row ready to be joined into View().
+func (m Model) renderHelpBarSegment() string {
+	if m.term != nil {
+		return m.renderHelpBar()
+	}
+	return lipgloss.NewStyle().Background(t.Surface).Padding(0, appMarginX).Render(m.renderHelpBar())
+}
+
 func (m Model) renderHelpBar() string {
 	cw := innerW(m.width)
 	// HelpBarStyle pads 1 col per side, so the wrap budget is cw-2.
 	inner := cw - 2
 	if inner < 1 {
 		inner = 1
+	}
+	// While the floating terminal is open every keystroke belongs to the shell,
+	// so the regular key hints are misleading: render the session command on an
+	// amber strip from the very left edge, ending right where the close hint
+	// takes over on the regular bar background.
+	if m.term != nil {
+		action := "exit or Ctrl+D to close"
+		if len(m.term.args) > 0 && m.term.args[0] == "attach" {
+			action = "Ctrl+P Ctrl+Q to detach"
+		}
+		// Budget the visible row so the amber + hint never exceed m.width.
+		// visible = " " + title + " " + " " + action = 3 + titleW + actionW
+		available := m.width - 3
+		if available < 1 {
+			available = 1
+		}
+		actionW := len(action)
+		if actionW >= available {
+			actionW = 0 // action too long for the bar; drop it
+		}
+		titleW := max(1, available-actionW)
+		title := fitRunes(m.term.title(), titleW)
+		amber := lipgloss.NewStyle().Background(t.Warning).Foreground(t.Background).Bold(true)
+		hintStyle := lipgloss.NewStyle().Background(t.Surface).Foreground(t.Muted)
+		var actionStr string
+		if actionW > 0 {
+			actionStr = hintStyle.Render(" " + fitRunes(action, actionW))
+		}
+		row := amber.Render(" "+title+" ") + actionStr
+		return lipgloss.NewStyle().Background(t.Surface).Width(m.width).Render(row)
 	}
 	if m.helpOn {
 		return HelpBarStyle.Width(cw).Render(fitRunes(m.help.View(keys), inner))
