@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -528,7 +529,7 @@ func TestHLSwitchTabsWithWrap(tt *testing.T) {
 		return next
 	}
 
-	// l advances containers -> images -> volumes -> networks -> (wrap) containers
+	// l advances containers -> images -> volumes -> networks -> compose -> (wrap) containers
 	cur := hl(m, 'l')
 	if cur.activeTab != tabImages {
 		tt.Fatalf("l from containers = %d, want images", cur.activeTab)
@@ -542,14 +543,18 @@ func TestHLSwitchTabsWithWrap(tt *testing.T) {
 		tt.Fatalf("l from volumes = %d, want networks", cur.activeTab)
 	}
 	cur = hl(cur, 'l')
+	if cur.activeTab != tabCompose {
+		tt.Fatalf("l from networks = %d, want compose", cur.activeTab)
+	}
+	cur = hl(cur, 'l')
 	if cur.activeTab != tabContainers {
-		tt.Fatalf("l from networks = %d, want wrap to containers", cur.activeTab)
+		tt.Fatalf("l from compose = %d, want wrap to containers", cur.activeTab)
 	}
 
 	// h goes backwards and wraps at the other edge
 	cur = hl(cur, 'h')
-	if cur.activeTab != tabNetworks {
-		tt.Fatalf("h from containers = %d, want wrap to networks", cur.activeTab)
+	if cur.activeTab != tabCompose {
+		tt.Fatalf("h from containers = %d, want wrap to compose", cur.activeTab)
 	}
 
 	// the selection always resets to the top of the new tab
@@ -3099,6 +3104,258 @@ func TestNetworkListRendersStatusLabels(tt *testing.T) {
 	}
 }
 
+func TestComposeListRendersProjects(tt *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	tt.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+
+	m := New(nil)
+	m.width = 150
+	m.height = 30
+	m.ready = true
+	m.loading = false
+	m.compose = []docker.ComposeProject{
+		{Name: "webtier", Services: []docker.ComposeService{
+			{Name: "api", Running: true},
+			{Name: "db", Running: true},
+			{Name: "web", Running: false},
+		}, Running: 2, Total: 3, ConfigFiles: "docker-compose.yml"},
+		{Name: "emptyproj", Services: []docker.ComposeService{{Name: "worker", Running: false}}, Running: 0, Total: 1, ConfigFiles: ""},
+	}
+	m.fitMainViewport()
+
+	w, vw, h := innerW(m.width), innerW(m.width)-1, m.height-tabBarHeight-helpBarHeight
+	hdr, rows := m.renderComposeList(w, vw, h)
+	if !strings.Contains(hdr, "PROJECT") {
+		tt.Errorf("header lacks a PROJECT column: %q", stripANSI(hdr))
+	}
+	if !strings.Contains(hdr, "SERVICES") {
+		tt.Errorf("header lacks a SERVICES column: %q", stripANSI(hdr))
+	}
+	if !strings.Contains(hdr, "CONFIG") {
+		tt.Errorf("header lacks a CONFIG column: %q", stripANSI(hdr))
+	}
+
+	lines := strings.Split(stripANSI(rows), "\n")
+	if len(lines) != len(m.compose) {
+		tt.Fatalf("got %d rows, want %d", len(lines), len(m.compose))
+	}
+
+	// Fixed offsets of the row format (" %s  %-40s %-14s %-s").
+	const servicesCol = 45 // SERVICES label begins here
+	assertRow := func(i int, wantLabel string) {
+		runes := []rune(lines[i])
+		if string(runes[1]) != "▶" {
+			tt.Errorf("row %d chevron = %q, want collapsed ▶", i, string(runes[1]))
+		}
+		// project rows carry no status dot: the chevron is the leading glyph
+		if string(runes[2]) != " " || string(runes[3]) != " " {
+			tt.Errorf("row %d has an unexpected glyph after the chevron: %q", i, string(runes[2:4]))
+		}
+		got := string(runes[servicesCol : servicesCol+len([]rune(wantLabel))])
+		if got != wantLabel {
+			tt.Errorf("row %d label at col %d = %q, want %q (line %q)", i, servicesCol, got, wantLabel, lines[i])
+		}
+	}
+	assertRow(0, "2/3 up")
+	assertRow(1, "0/1 up")
+
+	// a running project shows the success green dot; a fully-down one muted gray
+	if !strings.Contains(rows, "38;2;63;185;80") {
+		tt.Errorf("UP project should be success green (63;185;80):\n%s", rows)
+	}
+	if !strings.Contains(rows, "38;2;139;147;158") {
+		tt.Errorf("DOWN project should be muted gray (139;147;158):\n%s", rows)
+	}
+}
+
+func TestComposeListExpandableRows(tt *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	tt.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+
+	m := New(nil)
+	m.width = 150
+	m.height = 30
+	m.ready = true
+	m.loading = false
+	m.activeTab = tabCompose
+	m.compose = []docker.ComposeProject{
+		{Name: "webtier", Services: []docker.ComposeService{
+			{Name: "api", Running: true},
+			{Name: "db", Running: true},
+			{Name: "web", Running: false},
+		}, Running: 2, Total: 3, ConfigFiles: "docker-compose.yml"},
+		{Name: "emptyproj", Services: []docker.ComposeService{{Name: "worker", Running: false}}, Running: 0, Total: 1, ConfigFiles: ""},
+	}
+	m.fitMainViewport()
+
+	w, vw, h := innerW(m.width), innerW(m.width)-1, m.height-tabBarHeight-helpBarHeight
+	raw := func() string {
+		_, rows := m.renderComposeList(w, vw, h)
+		return rows
+	}
+	lines := func() []string {
+		return strings.Split(stripANSI(raw()), "\n")
+	}
+
+	if got := m.composeListRows(); got != 2 {
+		tt.Fatalf("collapsed composeListRows = %d, want 2", got)
+	}
+	if l := lines(); len(l) != 2 {
+		tt.Fatalf("collapsed render has %d rows, want 2", len(l))
+	}
+
+	// space on the webtier project row expands it below the project row.
+	m.selectedIdx = 0
+	m.toggleComposeExpanded()
+	if got := m.composeListRows(); got != 5 {
+		tt.Fatalf("expanded composeListRows = %d, want 5", got)
+	}
+	l := lines()
+	if len(l) != 5 {
+		tt.Fatalf("expanded render has %d rows, want %d:\n%s", len(l), 5, strings.Join(l, "\n"))
+	}
+	// the expanded project flips its chevron to ▼; collapsed ones stay ▶.
+	if r := []rune(l[0]); string(r[1]) != "▼" {
+		tt.Errorf("expanded project chevron = %q, want ▼\n%s", string(r[1]), l[0])
+	}
+	if r := []rune(l[4]); string(r[1]) != "▶" {
+		tt.Errorf("collapsed project chevron = %q, want ▶\n%s", string(r[1]), l[4])
+	}
+	// project rows have no status dot: the name starts right after the
+	// chevron+gap ("▸ " -> column 4). Service rows keep their dot at column 1
+	// and tuck the branch/name under the parent with no extra indent.
+	if got := string([]rune(l[0])[4:11]); got != "webtier" {
+		tt.Errorf("expanded project should start its name at col 4: %q", got)
+	}
+	if r := []rune(l[1]); string(r[1]) != "●" || !strings.Contains(l[1], "api") || !strings.Contains(l[1], "├") {
+		tt.Errorf("service row 1 should keep its dot and branch near the column 1: %q", l[1])
+	}
+	if !strings.Contains(l[2], "db") || !strings.Contains(l[2], "up") {
+		tt.Errorf("service row 2 should show db up: %q", l[2])
+	}
+	if !strings.Contains(l[3], "web") || !strings.Contains(l[3], "down") {
+		tt.Errorf("service row 3 should show web down: %q", l[3])
+	}
+	if !strings.Contains(l[4], "emptyproj") {
+		tt.Errorf("row 4 should be the next project: %q", l[4])
+	}
+
+	// green + muted dots both present across service rows (checked on the raw
+	// render, before ANSI stripping).
+	rawRows := raw()
+	if !strings.Contains(rawRows, "38;2;63;185;80") || !strings.Contains(rawRows, "38;2;139;147;158") {
+		tt.Errorf("service rows must color up/down dots (green/muted):\n%s", stripANSI(rawRows))
+	}
+
+	// flat navigation: at the last project row, down clamps on the flat length
+	m.selectedIdx = 4
+	m.moveDown()
+	if m.selectedIdx != 4 {
+		tt.Errorf("moveDown at flat bottom = %d, want 4", m.selectedIdx)
+	}
+	m.selectedIdx = 3
+	m.moveDown()
+	if m.selectedIdx != 4 {
+		tt.Errorf("moveDown from service row = %d, want 4", m.selectedIdx)
+	}
+
+	// space collapses the project again (from its own project row).
+	m.selectedIdx = 0
+	m.toggleComposeExpanded()
+	if got := m.composeListRows(); got != 2 {
+		tt.Fatalf("re-collapsed composeListRows = %d, want 2", got)
+	}
+	// selection was inside the collapsed project: it clamps back to its row.
+	if m.selectedIdx != 0 {
+		tt.Errorf("selection after collapse = %d, want 0", m.selectedIdx)
+	}
+}
+
+func TestComposeServiceRowOpensMenu(tt *testing.T) {
+	m := New(nil)
+	m.width = 120
+	m.height = 30
+	m.ready = true
+	m.activeTab = tabCompose
+	m.compose = []docker.ComposeProject{
+		{Name: "webtier", Services: []docker.ComposeService{
+			{Name: "api", Running: true},
+			{Name: "worker", Running: false},
+		}, Running: 1, Total: 2, ConfigFiles: "docker-compose.yml"},
+	}
+	m.composeExpanded["webtier"] = true
+	x := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}
+
+	m.selectedIdx = 1 // running service row
+	next, cmd := testUpdate(m, x)
+	if !next.menuOpen {
+		tt.Fatal("x on a running service row should open the service menu")
+	}
+	if cmd != nil {
+		tt.Error("x must not dispatch an action")
+	}
+	if got := next.menu.header; got != "Actions for service api" {
+		tt.Errorf("service menu title = %q", got)
+	}
+	var labels, keys []string
+	for _, it := range next.menu.items {
+		labels = append(labels, it.label)
+		keys = append(keys, it.key)
+	}
+	if want := []string{"Stop", "Restart", "Exec shell", "Logs"}; !reflect.DeepEqual(labels, want) {
+		tt.Errorf("running service items = %q, want %q", labels, want)
+	}
+	if want := []string{"s", "r", "e", "l"}; !reflect.DeepEqual(keys, want) {
+		tt.Errorf("running service keys = %q, want %q", keys, want)
+	}
+	if got := next.menu.dividers; !reflect.DeepEqual(got, []int{3}) {
+		tt.Errorf("dividers = %v, want [3]", got)
+	}
+	for i, it := range next.menu.items {
+		want := map[string]string{
+			"Stop":       "docker compose stop api",
+			"Restart":    "docker compose restart api",
+			"Exec shell": "docker compose exec api sh",
+			"Logs":       "docker compose logs -f api",
+		}[it.label]
+		if i < 2 && it.cli != want {
+			tt.Errorf("item %d CLI = %q, want %q", i, it.cli, want)
+		}
+	}
+
+	m.selectedIdx = 2 // down service row
+	next, _ = testUpdate(m, x)
+	if !next.menuOpen {
+		tt.Fatal("x on a down service row should open the service menu")
+	}
+	if got := next.menu.header; got != "Actions for service worker" {
+		tt.Errorf("down service menu title = %q", got)
+	}
+	labels, keys = nil, nil
+	for _, it := range next.menu.items {
+		labels = append(labels, it.label)
+		keys = append(keys, it.key)
+	}
+	if want := []string{"Start", "Restart", "Logs"}; !reflect.DeepEqual(labels, want) {
+		tt.Errorf("down service items = %q, want %q", labels, want)
+	}
+	if want := []string{"s", "r", "l"}; !reflect.DeepEqual(keys, want) {
+		tt.Errorf("down service keys = %q, want %q", keys, want)
+	}
+
+	// the project row itself still opens the project menu
+	m.selectedIdx = 0
+	next, _ = testUpdate(m, x)
+	if !next.menuOpen || next.menu.header != "Actions for project webtier" {
+		tt.Errorf("x on the project row should open the project menu, got header = %q open=%v", next.menu.header, next.menuOpen)
+	}
+	if got := next.menu.items[0].label; got != "Up -d" {
+		tt.Errorf("project menu first item = %q, want Up -d", got)
+	}
+}
+
 func TestKeyXOpensNetworkMenu(tt *testing.T) {
 	m := New(nil)
 	m.width = 120
@@ -3391,6 +3648,11 @@ func TestTabBarToastBadge(tt *testing.T) {
 	}
 	if rows := strings.Count(off, "\n"); rows != 2 {
 		tt.Errorf("tab bar should stay 3 rows without the badge, got %d", rows+1)
+	}
+	for _, item := range tabBarItems() {
+		if !strings.Contains(off, item) {
+			tt.Errorf("tab bar is missing tab %q", item)
+		}
 	}
 
 	m.copyToast = true

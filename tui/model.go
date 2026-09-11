@@ -29,12 +29,14 @@ const (
 	tabImages
 	tabVolumes
 	tabNetworks
+	tabCompose
 )
 
 type containerMsg []docker.Container
 type imageMsg []docker.Image
 type volumeMsg []docker.Volume
 type networkMsg []docker.Network
+type composeMsg []docker.ComposeProject
 type errMsg struct{ err error }
 
 // statsMsg carries one fresh resource snapshot per running container.
@@ -135,11 +137,17 @@ type Model struct {
 	images      []docker.Image
 	volumes     []docker.Volume
 	networks    []docker.Network
+	compose     []docker.ComposeProject
 	selectedIdx int
 	activeTab   tab
 	showAll     bool
 	loading     bool
 	err         error
+
+	// composeExpanded remembers which compose projects are unfolded into
+	// their service rows. Keyed by project name so it survives list refreshes
+	// (and project churn); a stale key for a removed project is harmless.
+	composeExpanded map[string]bool
 
 	// stats holds the latest one-shot resource snapshots per container id;
 	// statsPrev keeps the previous CPU counters so cpuPercent can be computed
@@ -189,14 +197,15 @@ func New(dcli *docker.Client) Model {
 	s.Style = BaseStyle.Copy().Foreground(t.Accent)
 	s.Spinner = spinner.Dot
 	return Model{
-		docker:      dcli,
-		spinner:     s,
-		help:        help.New(),
-		showAll:     true,
-		logFollow:   true,
-		selectedIdx: 0,
-		stats:       map[string]docker.Stats{},
-		statsPrev:   map[string]statsSample{},
+		docker:          dcli,
+		spinner:         s,
+		help:            help.New(),
+		showAll:         true,
+		logFollow:       true,
+		selectedIdx:     0,
+		stats:           map[string]docker.Stats{},
+		statsPrev:       map[string]statsSample{},
+		composeExpanded: map[string]bool{},
 	}
 }
 
@@ -357,6 +366,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showAll = !m.showAll
 			return m, m.refreshNow()
 		case key.Matches(msg, keys.StartStop):
+			if m.activeTab == tabCompose {
+				m.toggleComposeExpanded()
+				return m, nil
+			}
 			return m, m.toggleContainer()
 		case key.Matches(msg, keys.Restart):
 			return m, m.restartContainer()
@@ -412,6 +425,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.refreshNow()
 		case key.Matches(msg, keys.Four):
 			m.switchTab(tabNetworks)
+			return m, m.refreshNow()
+		case key.Matches(msg, keys.Five):
+			m.switchTab(tabCompose)
 			return m, m.refreshNow()
 		case key.Matches(msg, keys.PrevTab):
 			m.switchTabRelative(-1)
@@ -526,6 +542,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil // successful refresh clears transient errors
 		m.loading = false
 		if m.selectedIdx >= len(m.networks) {
+			m.selectedIdx = 0
+		}
+		m.fitViewports()
+		m.scrollToSelected()
+		return m, nil
+
+	case composeMsg:
+		m.compose = msg
+		m.err = nil // successful refresh clears transient errors
+		m.loading = false
+		if m.selectedIdx >= m.composeListRows() {
 			m.selectedIdx = 0
 		}
 		m.fitViewports()
@@ -873,11 +900,17 @@ func fitRunes(s string, max int) string {
 	return string(r[:max-1]) + "…"
 }
 
+// tabBarItems is the single source of truth for the global tab strip: it
+// drives the rendered tab bar AND the mouse hit-test so the two can never
+// drift apart (see handleClick).
+func tabBarItems() []string {
+	return []string{"[1] Containers", "[2] Images", "[3] Volumes", "[4] Networks", "[5] Projects"}
+}
+
 func (m Model) renderTabBar() string {
 	cw := innerW(m.width)
-	items := []string{"[1] Containers", "[2] Images", "[3] Volumes", "[4] Networks"}
 	var tabs []string
-	for i, item := range items {
+	for i, item := range tabBarItems() {
 		if i == int(m.activeTab) {
 			tabs = append(tabs, TabActiveStyle.Render(" "+item+" "))
 		} else {
@@ -926,6 +959,8 @@ func (m Model) renderMain() string {
 			hdr, rows = m.renderVolumeList(w, vw, h)
 		case tabNetworks:
 			hdr, rows = m.renderNetworkList(w, vw, h)
+		case tabCompose:
+			hdr, rows = m.renderComposeList(w, vw, h)
 		}
 	}
 	m.mainViewport.Width = vw
@@ -2009,6 +2044,16 @@ func (m *Model) openContextMenu() {
 			return
 		}
 		m.menu = m.buildNetworkMenu()
+	case tabCompose:
+		if m.selectedIdx < 0 || m.selectedIdx >= m.composeListRows() {
+			return
+		}
+		proj, svc := m.composeItemAt(m.selectedIdx)
+		if svc != -1 {
+			m.menu = m.buildComposeServiceMenu(proj, svc)
+		} else {
+			m.menu = m.buildComposeMenu(proj)
+		}
 	default:
 		return
 	}
@@ -2025,10 +2070,9 @@ func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
 
 	// Global tabs: y=0~2 (line + tabs + line)
 	if y >= 0 && y <= 2 {
-		items := []string{"[1] Containers", "[2] Images", "[3] Volumes", "[4] Networks"}
 		var tabBorders []int
 		cum := 0
-		for _, item := range items {
+		for _, item := range tabBarItems() {
 			w := lipgloss.Width(TabInactiveStyle.Render(" " + item + " "))
 			cum += w
 			tabBorders = append(tabBorders, cum)
@@ -2109,6 +2153,8 @@ func (m Model) handleClick(x, y int) (Model, tea.Cmd) {
 			maxIdx = len(m.volumes) - 1
 		case tabNetworks:
 			maxIdx = len(m.networks) - 1
+		case tabCompose:
+			maxIdx = m.composeListRows() - 1
 		}
 		if rowY >= 0 && rowY <= maxIdx {
 			m.selectedIdx = rowY
@@ -2680,7 +2726,7 @@ func (m *Model) switchTab(t tab) {
 // switchTabRelative moves to the neighbouring main tab (h/l), wrapping around
 // the tabNetworks<->tabContainers edges.
 func (m *Model) switchTabRelative(delta int) {
-	n := 4
+	n := 5
 	m.switchTab(tab((int(m.activeTab) + delta + n) % n))
 }
 
@@ -2700,6 +2746,8 @@ func (m *Model) moveDown() {
 		maxIdx = len(m.volumes) - 1
 	case tabNetworks:
 		maxIdx = len(m.networks) - 1
+	case tabCompose:
+		maxIdx = m.composeListRows() - 1
 	}
 	if m.selectedIdx < maxIdx {
 		m.selectedIdx++
@@ -2721,6 +2769,69 @@ func (m *Model) scrollToSelected() {
 	} else if rowY >= yOff+vh-1 {
 		m.mainYOff = rowY - vh + 2
 	}
+}
+
+// composeListRows returns the number of selectable rows of the Projects tab:
+// the project rows plus one row per service of every expanded project. Rows
+// are traversed in project order (see composeItemAt), so selection indices
+// map 1:1 onto the rendered list.
+func (m Model) composeListRows() int {
+	n := len(m.compose)
+	for i := range m.compose {
+		if m.composeExpanded[m.compose[i].Name] {
+			n += len(m.compose[i].Services)
+		}
+	}
+	return n
+}
+
+// composeItemAt resolves a flat list row index to its origin: proj is the
+// project table index and svc the index inside that project's services, or
+// -1 when the row is the project row itself. Out-of-range indices map to the
+// nearest valid item.
+func (m Model) composeItemAt(idx int) (proj, svc int) {
+	proj = len(m.compose) - 1
+	if proj < 0 {
+		return 0, -1
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	for i := range m.compose {
+		n := 1
+		if m.composeExpanded[m.compose[i].Name] {
+			n += len(m.compose[i].Services)
+		}
+		if idx < n {
+			proj = i
+			if expanded := m.composeExpanded[m.compose[i].Name]; expanded && idx >= 1 {
+				return i, idx - 1
+			}
+			return i, -1
+		}
+		idx -= n
+	}
+	if m.composeExpanded[m.compose[proj].Name] {
+		return proj, len(m.compose[proj].Services) - 1
+	}
+	return proj, -1
+}
+
+// toggleComposeExpanded folds/unfolds the compose project owning the selected
+// row (space on a service row toggles its parent project). Collapsing later
+// projects shrinks the flat list, so the selection is clamped back.
+func (m *Model) toggleComposeExpanded() {
+	if len(m.compose) == 0 {
+		return
+	}
+	proj, _ := m.composeItemAt(m.selectedIdx)
+	name := m.compose[proj].Name
+	m.composeExpanded[name] = !m.composeExpanded[name]
+	if max := m.composeListRows() - 1; m.selectedIdx > max {
+		m.selectedIdx = max
+	}
+	m.fitViewports()
+	m.scrollToSelected()
 }
 
 // ---- commands ----
@@ -2753,6 +2864,12 @@ func (m Model) refreshNow() tea.Cmd {
 				return networks[i].Name < networks[j].Name
 			})
 			return networkMsg(networks)
+		case tabCompose:
+			projects, err := m.docker.ListComposeProjects(m.showAll)
+			if err != nil {
+				return errMsg{err}
+			}
+			return composeMsg(projects)
 		default:
 			containers, err := m.docker.ListContainers(m.showAll)
 			if err != nil {
@@ -2918,4 +3035,110 @@ func (m Model) autoRefreshLogs() tea.Cmd {
 		return nil
 	}
 	return m.loadContainerLogs()
+}
+
+func (m Model) renderComposeList(w, vw, h int) (string, string) {
+	colW := vw
+	if m.loading && len(m.compose) == 0 {
+		return "", MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" Loading compose projects…"))
+	}
+	if len(m.compose) == 0 {
+		return "", MainPanelStyle.Width(w).Height(h).Render(BaseStyle.Foreground(t.Muted).Render(" No compose projects found"))
+	}
+
+	hdr := fmt.Sprintf("    %-40s %-14s %-s", "PROJECT", "SERVICES", "CONFIG")
+	header, sep := renderTableFrame(w, hdr)
+
+	// Fixed rune offsets of the row produced by the format string
+	// (" %s  %-40s %-14s %-s"): the expand chevron sits at column 1, then
+	// PROJECT / SERVICES / CONFIG. Project rows carry no status dot — the
+	// chevron (▾/▸) is the row's leading glyph.
+	const (
+		servicesCol = 45 // SERVICES label begins here
+		servicesW   = 14
+		configCol   = 60 // CONFIG label begins here
+	)
+
+	var rows []string
+	flat := 0
+	for i := range m.compose {
+		p := &m.compose[i]
+		name := Truncate(p.Name, 40)
+		svcs := fmt.Sprintf("%d/%d up", p.Running, p.Total)
+		config := Truncate(p.ConfigFiles, vw-configCol)
+		if config == "" {
+			config = "<cwd>"
+		}
+
+		var st struct {
+			label string
+			color lipgloss.Color
+		}
+		if p.Running > 0 {
+			st.label = "UP"
+			st.color = t.Accent
+		} else {
+			st.label = "DOWN"
+			st.color = t.Muted
+		}
+		// The chevron doubles as the row's expand indicator: ▼ when the
+		// project is unfolded into its services, ▶ when collapsed. It is
+		// rendered in the bright foreground so it reads as a control.
+		chev := "▶"
+		if m.composeExpanded[p.Name] {
+			chev = "▼"
+		}
+
+		runes := rowLine(fmt.Sprintf(" %s  %-40s %-14s %-s", chev, name, svcs, config), colW)
+
+		bgStyle := lipgloss.NewStyle().Background(m.rowBG(flat))
+		flat++
+
+		statusEnd := servicesCol + len([]rune(st.label))
+		row := bgStyle.Foreground(t.Foreground).Render(seg(runes, 0, servicesCol)) +
+			bgStyle.Copy().Foreground(st.color).Render(seg(runes, servicesCol, statusEnd)) +
+			bgStyle.Foreground(t.Foreground).Render(seg(runes, statusEnd, len(runes)))
+		rows = append(rows, row)
+
+		if !m.composeExpanded[p.Name] {
+			continue
+		}
+		for _, svc := range p.Services {
+			var sdot string
+			var scolor lipgloss.Color
+			if svc.Running {
+				sdot = "●"
+				scolor = t.Accent
+			} else {
+				sdot = "○"
+				scolor = t.Muted
+			}
+			sbg := lipgloss.NewStyle().Background(m.rowBG(flat))
+			flat++
+			// " %s  ├ %-38s %-14s": service dot at column 1, branch at 4,
+			// name from 6, status label at 6+38 — nested rows tuck right
+			// under the parent name with no extra indent.
+			label := m.serviceState(svc)
+			sname := Truncate(svc.Name, 38)
+			srunes := rowLine(fmt.Sprintf(" %s  ├ %-38s %-14s", sdot, sname, label), colW)
+			nameEnd := 6 + len([]rune(sname))
+			labelEnd := nameEnd + len([]rune(label))
+			srow := sbg.Render(seg(srunes, 0, 1)) +
+				sbg.Copy().Foreground(scolor).Render(seg(srunes, 1, 2)) +
+				sbg.Foreground(t.Foreground).Render(seg(srunes, 2, nameEnd)) +
+				sbg.Copy().Foreground(scolor).Render(seg(srunes, nameEnd, labelEnd)) +
+				sbg.Foreground(t.Foreground).Render(seg(srunes, labelEnd, len(srunes)))
+			rows = append(rows, srow)
+		}
+	}
+	return header + "\n" + sep, lipgloss.JoinVertical(lipgloss.Top, rows...)
+}
+
+// serviceState is the short per-service status label rendered to the right of
+// an expanded service row.
+func (m Model) serviceState(s docker.ComposeService) string {
+	if s.Running {
+		return "up"
+	}
+	return "down"
 }

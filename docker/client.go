@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
-	mclient "github.com/moby/moby/client"
 	ctypes "github.com/moby/moby/api/types/container"
+	mclient "github.com/moby/moby/client"
 )
 
 type Container struct {
@@ -22,6 +23,7 @@ type Container struct {
 	State   string
 	Status  string
 	Ports   []Port
+	Labels  map[string]string
 }
 
 // Stats is a single resource-usage snapshot of a container. CPUPercent is
@@ -155,6 +157,7 @@ func (c *Client) ListContainers(all bool) ([]Container, error) {
 			State:   string(s.State),
 			Status:  s.Status,
 			Ports:   ports,
+			Labels:  s.Labels,
 		})
 	}
 	return out, nil
@@ -458,6 +461,96 @@ func (c *Client) InspectContainer(id string) (*ContainerDetails, error) {
 
 func (c *Client) Close() error {
 	return c.cli.Close()
+}
+
+// ComposeService is one service of a compose project and whether at least one
+// of its containers is currently running (replicas collapse into a single
+// service row).
+type ComposeService struct {
+	Name    string
+	Running bool
+}
+
+// ComposeProject is a docker compose project extracted from container labels.
+type ComposeProject struct {
+	Name        string
+	Services    []ComposeService
+	Running     int
+	Total       int
+	ConfigFiles string
+}
+
+// ListComposeProjects groups all containers by their com.docker.compose.project
+// label and returns one ComposeProject per project name. Containers without the
+// label are ignored; empty results yield an empty slice (never nil).
+func (c *Client) ListComposeProjects(all bool) ([]ComposeProject, error) {
+	containers, err := c.ListContainers(all)
+	if err != nil {
+		return nil, err
+	}
+	return groupComposeProjects(containers), nil
+}
+
+// groupComposeProjects turns a flat container list into compose projects keyed
+// on the com.docker.compose.project label. It is a pure function so the
+// grouping/sorting logic is unit-tested without a daemon.
+func groupComposeProjects(containers []Container) []ComposeProject {
+	type project struct {
+		services    map[string]bool
+		running     int
+		total       int
+		configFiles string
+	}
+	projects := make(map[string]*project)
+	for _, ct := range containers {
+		name := ct.Labels["com.docker.compose.project"]
+		if name == "" {
+			continue
+		}
+		p := projects[name]
+		if p == nil {
+			p = &project{services: make(map[string]bool)}
+			projects[name] = p
+		}
+		if svc := ct.Labels["com.docker.compose.service"]; svc != "" {
+			// Always register the service so fully-down (exited) services
+			// still appear in the list; Running collapses replicas (up if
+			// any container of the service is running).
+			if ct.State == "running" {
+				p.services[svc] = true
+			} else if _, seen := p.services[svc]; !seen {
+				p.services[svc] = false
+			}
+		}
+		p.total++
+		if ct.State == "running" {
+			p.running++
+		}
+		if p.configFiles == "" {
+			p.configFiles = ct.Labels["com.docker.compose.project.config_files"]
+		}
+	}
+	out := make([]ComposeProject, 0, len(projects))
+	for name, p := range projects {
+		svcs := make([]ComposeService, 0, len(p.services))
+		for s, running := range p.services {
+			svcs = append(svcs, ComposeService{Name: s, Running: running})
+		}
+		sort.Slice(svcs, func(i, j int) bool {
+			return svcs[i].Name < svcs[j].Name
+		})
+		out = append(out, ComposeProject{
+			Name:        name,
+			Services:    svcs,
+			Running:     p.running,
+			Total:       p.total,
+			ConfigFiles: p.configFiles,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Name < out[j].Name
+	})
+	return out
 }
 
 // StripDockerStreamHeaders removes the 8-byte Docker stream header from log frames.

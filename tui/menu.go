@@ -243,6 +243,145 @@ func (m Model) buildNetworkMenu() popupMenu {
 	return m.buildPopupMenu("Actions for network "+n.Name, items, dividers)
 }
 
+// buildComposeMenu builds the popup for the selected compose project on the
+// Projects tab. The keyboard x opens it; from here the project can be brought
+// up, restarted, brought down (with or without volume removal) or have its
+// logs streamed in the floating terminal. proj is the project's index in the
+// (flat-selection) compose list.
+func (m Model) buildComposeMenu(proj int) popupMenu {
+	p := m.compose[proj]
+	items, dividers := m.composeMenuItems(p)
+	return m.buildPopupMenu("Actions for project "+p.Name, items, dividers)
+}
+
+// buildComposeServiceMenu builds the popup for a service row of an expanded
+// project. proj/svc index into m.compose; the menu mirrors the container menu
+// (Stop/Start, Restart, Exec shell) plus a streaming Logs action, all scoped
+// to the single service.
+func (m Model) buildComposeServiceMenu(proj, svc int) popupMenu {
+	p := m.compose[proj]
+	s := p.Services[svc]
+	items, dividers := m.composeServiceMenuItems(p, s)
+	return m.buildPopupMenu("Actions for service "+s.Name, items, dividers)
+}
+
+// composeMenuItems lays out the project-level actions: up/restart/down are
+// non-destructive lifecycle ops; "down -v" is marked destructive so it stages
+// a confirm, and logs opens the streaming terminal. A divider separates the
+// safe lifecycle group from the logs action.
+func (m Model) composeMenuItems(p docker.ComposeProject) ([]menuItem, []int) {
+	items := []menuItem{
+		{
+			label:    "Up -d",
+			key:      "u",
+			cli:      "docker compose up -d",
+			activate: func() tea.Cmd { return m.composeUp(p) },
+		},
+		{
+			label:    "Restart",
+			key:      "r",
+			cli:      "docker compose restart",
+			activate: func() tea.Cmd { return m.composeRestart(p) },
+		},
+		{
+			label:    "Down",
+			key:      "d",
+			cli:      "docker compose down",
+			activate: func() tea.Cmd { return m.composeDown(p, false) },
+		},
+		{
+			label:         "Down -v",
+			key:           "v",
+			cli:           "docker compose down --volumes",
+			confirm:       true,
+			confirmHeader: "Down " + p.Name + " and remove its volumes?",
+			activate:      func() tea.Cmd { return m.composeDown(p, true) },
+		},
+	}
+	dividers := []int{len(items)}
+	items = append(items, menuItem{
+		label:    "Logs",
+		key:      "l",
+		cli:      "docker compose logs -f",
+		activate: func() tea.Cmd { return m.composeLogs(p) },
+	})
+	return items, dividers
+}
+
+// composeUp / composeRestart / composeDown run the CLI file operations for the
+// selected project and refresh the list, mirroring the other tab actions.
+func (m Model) composeUp(p docker.ComposeProject) tea.Cmd {
+	return m.runDockerOp(func() bool { return m.activeTab == tabCompose }, func() error { return m.docker.ComposeUp(p) })
+}
+
+func (m Model) composeRestart(p docker.ComposeProject) tea.Cmd {
+	return m.runDockerOp(func() bool { return m.activeTab == tabCompose }, func() error { return m.docker.ComposeRestart(p) })
+}
+
+func (m Model) composeDown(p docker.ComposeProject, volumes bool) tea.Cmd {
+	return m.runDockerOp(func() bool { return m.activeTab == tabCompose }, func() error { return m.docker.ComposeDown(p, volumes) })
+}
+
+// composeLogs opens the streaming `docker compose logs -f` session for the
+// project in the floating terminal.
+func (m Model) composeLogs(p docker.ComposeProject) tea.Cmd {
+	return m.launchTerminal(m.docker.ComposeLogsArgs(p)...)
+}
+
+// composeServiceMenuItems lays out the per-service actions, mirroring the
+// container menu: a state-aware Stop/Start, Restart in every state, and Exec
+// shell only while running (docker compose exec needs a live container). The
+// streaming Logs action is separated behind a divider like in the project menu.
+func (m Model) composeServiceMenuItems(p docker.ComposeProject, s docker.ComposeService) ([]menuItem, []int) {
+	var items []menuItem
+	if s.Running {
+		items = append(items,
+			menuItem{label: "Stop", key: "s", cli: "docker compose stop " + s.Name, activate: func() tea.Cmd { return m.composeServiceStop(p, s) }},
+			menuItem{label: "Restart", key: "r", cli: "docker compose restart " + s.Name, activate: func() tea.Cmd { return m.composeServiceRestart(p, s) }},
+			menuItem{label: "Exec shell", key: "e", cli: "docker compose exec " + s.Name + " sh", activate: func() tea.Cmd { return m.composeServiceExec(p, s) }},
+		)
+	} else {
+		items = append(items,
+			menuItem{label: "Start", key: "s", cli: "docker compose up -d " + s.Name, activate: func() tea.Cmd { return m.composeServiceUp(p, s) }},
+			menuItem{label: "Restart", key: "r", cli: "docker compose restart " + s.Name, activate: func() tea.Cmd { return m.composeServiceRestart(p, s) }},
+		)
+	}
+	dividers := []int{len(items)}
+	items = append(items, menuItem{
+		label:    "Logs",
+		key:      "l",
+		cli:      "docker compose logs -f " + s.Name,
+		activate: func() tea.Cmd { return m.composeServiceLogs(p, s) },
+	})
+	return items, dividers
+}
+
+// composeServiceUp / composeServiceRestart / composeServiceStop run the CLI
+// service-scoped operations and refresh the list, mirroring the project ops.
+func (m Model) composeServiceUp(p docker.ComposeProject, s docker.ComposeService) tea.Cmd {
+	return m.runDockerOp(func() bool { return m.activeTab == tabCompose }, func() error { return m.docker.ComposeServiceUp(p, s.Name) })
+}
+
+func (m Model) composeServiceRestart(p docker.ComposeProject, s docker.ComposeService) tea.Cmd {
+	return m.runDockerOp(func() bool { return m.activeTab == tabCompose }, func() error { return m.docker.ComposeServiceRestart(p, s.Name) })
+}
+
+func (m Model) composeServiceStop(p docker.ComposeProject, s docker.ComposeService) tea.Cmd {
+	return m.runDockerOp(func() bool { return m.activeTab == tabCompose }, func() error { return m.docker.ComposeServiceStop(p, s.Name) })
+}
+
+// composeServiceLogs opens `docker compose logs -f <svc>` for the single
+// service in the floating terminal.
+func (m Model) composeServiceLogs(p docker.ComposeProject, s docker.ComposeService) tea.Cmd {
+	return m.launchTerminal(m.docker.ComposeServiceLogsArgs(p, s.Name)...)
+}
+
+// composeServiceExec opens `docker compose exec <svc> sh` in the floating
+// terminal, mirroring the container's exec shell action.
+func (m Model) composeServiceExec(p docker.ComposeProject, s docker.ComposeService) tea.Cmd {
+	return m.launchTerminal(m.docker.ComposeServiceExecArgs(p, s.Name)...)
+}
+
 // buildPopupMenu packages a header, the item list and their divider layout
 // into a centered popup box, clamped into the terminal and kept clear of the
 // tab bar. Every tab menu goes through here so sizing and placement stay the

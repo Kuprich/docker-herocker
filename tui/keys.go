@@ -24,6 +24,7 @@ type keyMap struct {
 	Select    key.Binding
 	Exec      key.Binding
 	Attach    key.Binding
+	Five      key.Binding
 }
 
 var keys = keyMap{
@@ -107,6 +108,10 @@ var keys = keyMap{
 	Attach: key.NewBinding(
 		key.WithKeys("t"),
 		key.WithHelp("t", "attach"),
+	),
+	Five: key.NewBinding(
+		key.WithKeys("5"),
+		key.WithHelp("5", "projects"),
 	),
 }
 
